@@ -1,0 +1,23 @@
+[package]
+name = "noid_gkr"
+version.workspace = true
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+noid_core = { path = "../noid_core" }
+noid_poseidon2b = { path = "../noid_poseidon2b" }
+noid_fri = { path = "../noid_fri" }
+noid_fri_binius = { path = "../noid_fri_binius" }
+noid_tx = { path = "../noid_tx" }
+rayon = "1.10"
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
+
+[dev-dependencies]
+rand = "0.8"
+bincode = "1"
+hex = "0.4"
+static_assertions = "1.1"

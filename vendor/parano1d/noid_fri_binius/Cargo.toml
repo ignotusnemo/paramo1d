@@ -1,0 +1,17 @@
+[package]
+name = "noid_fri_binius"
+version.workspace = true
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+noid_core = { path = "../noid_core" }
+noid_fri = { path = "../noid_fri" }
+noid_poseidon2b = { path = "../noid_poseidon2b" }
+rand_core = "0.6"
+rayon = "1.10"
+serde = { version = "1", features = ["derive"] }
+zeroize = "1.8"
+
+[dev-dependencies]
+rand = "0.8"

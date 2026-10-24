@@ -1,0 +1,30 @@
+[package]
+name = "noid_chain"
+version.workspace = true
+edition = "2021"
+license = "Apache-2.0"
+
+[features]
+# Isolated live fork tests only. Never enable for a public-network release.
+isolated-v1-1-testnet = []
+isolated-v2-fork-testnet = ["isolated-v1-1-testnet"]
+isolated-v2-1-fork-testnet = ["isolated-v2-fork-testnet"]
+isolated-authorization-fork-testnet = ["isolated-v2-1-fork-testnet"]
+
+[dependencies]
+tracing = { workspace = true }
+noid_core = { path = "../noid_core" }
+noid_poseidon2b = { path = "../noid_poseidon2b" }
+noid_tx = { path = "../noid_tx" }
+noid_fri = { path = "../noid_fri" }
+noid_fri_binius = { path = "../noid_fri_binius" }
+rayon = "1.10"
+libmdbx = "0.6"
+# The safe wrapper does not expose MDBX's bounded GC search option.
+mdbx-sys = "13.11"
+bincode = "1"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
+rayon     = "1.10"

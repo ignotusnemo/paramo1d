@@ -1,0 +1,56 @@
+m = 23
+log_n = 16
+initial_k = 6
+target_security_bits = 120
+analysis_version = "no_row_union_over_ben_sasson_2025_cor_1_4"
+field = "f128"
+hash = "poseidon2b"
+grinding_step = "post_commit_pre_queries"
+
+[[levels]]
+log_inv_rate = 1
+log_msg_cols = 10
+log_num_interleaved = 6
+k_recursive = 6
+regime = "udr"
+proximity_loss = 0.0
+queries = 294
+grinding_bits = 0
+fold_grinding_bits = 1
+ood_samples = 0
+target_security_bits = 120
+expected_eps_pg_bits = 119.0
+expected_eps_query_bits = 120.4
+
+[[levels]]
+log_inv_rate = 2
+log_msg_cols = 7
+log_num_interleaved = 3
+k_recursive = 3
+regime = "udr"
+proximity_loss = 0.0
+queries = 182
+grinding_bits = 0
+fold_grinding_bits = 0
+ood_samples = 0
+target_security_bits = 120
+expected_eps_pg_bits = 120.4
+expected_eps_query_bits = 120.1
+
+[[levels]]
+log_inv_rate = 4
+log_msg_cols = 4
+log_num_interleaved = 3
+k_recursive = 3
+regime = "udr"
+proximity_loss = 0.0
+queries = 137
+grinding_bits = 0
+fold_grinding_bits = 0
+ood_samples = 0
+target_security_bits = 120
+expected_eps_pg_bits = 121.1
+expected_eps_query_bits = 120.4
+
+[final_block]
+yr_log_n = 4

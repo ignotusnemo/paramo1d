@@ -1,0 +1,16 @@
+{
+  "package": "mdbx-sys",
+  "version": "13.11.0",
+  "registry": "crates.io",
+  "files": {
+    "Cargo.toml.orig": "15d1e252816f7e325567e5a8f20c45eeb26d4185892f93d1d30168d8ec6cb92b",
+    "build.rs": "fd590a510e00bf52715b1d8f4ed6aaa45f457fec43b598511dc209cc1bc4d538",
+    "Cargo.toml": "a62630bb72f53f193d18606c02ff5f0e9ebc6fe2680b557e707ae0676a53f2b0",
+    "Cargo.lock": "816c29a4786bd8066ea12947184795a47689297d18516e22a4468c99f043ee39",
+    "libmdbx/LICENSE": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594",
+    "libmdbx/mdbx.h": "55130f2cd30bb7865848776b0c9f2ffcf0c3a5c13aaeb36ab7bfbb48f172bdfc",
+    "libmdbx/NOTICE": "1596e2db4124828fe46a8ad356d5eb03d80ff15ffe93bc4891a383f802ef0c48",
+    "libmdbx/mdbx.c": "51e000f838b056341cbae3882a7dcd98471ceee2838e29f0ef81bc8d5adbaa4f",
+    "src/lib.rs": "a321f00eeba5f7c8cef41c2f01a9903ceb642b09bd59c507c6a440e1a8122585"
+  }
+}

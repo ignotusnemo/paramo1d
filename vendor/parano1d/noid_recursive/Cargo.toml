@@ -1,0 +1,20 @@
+[package]
+name = "noid_recursive"
+version.workspace = true
+edition = "2021"
+
+[dependencies]
+noid_core = { path = "../noid_core" }
+noid_poseidon2b = { path = "../noid_poseidon2b" }
+noid_chain = { path = "../noid_chain" }
+noid_tx = { path = "../noid_tx" }
+noid_gkr = { path = "../noid_gkr" }
+noid_fri = { path = "../noid_fri" }
+noid_fri_binius = { path = "../noid_fri_binius" }
+noid-ivc-core = { path = "../noid_ivc_core" }
+noid-ivc-prover = { path = "../noid_ivc_prover" }
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+tracing = { workspace = true }
+zstd = { version = "0.13", default-features = false }

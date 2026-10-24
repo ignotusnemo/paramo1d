@@ -1,0 +1,58 @@
+{
+  "network": "mainnet",
+  "upstream_commit": "848209d5db75137483cb41a94b310ad11463473f",
+  "artifacts": {
+    "legacy": {
+      "source": "history-step-pack-v1/v1/history-step.runtime",
+      "sha256": "8fab1225073d658bc1988573c79b0520ce141d2ac4a0e7c8cc2562be0e6767a5",
+      "bytes": 2214607
+    },
+    "v2": {
+      "source": "history-step-pack-v2/v2-runtime-metadata.bin",
+      "sha256": "04e969990958520dbc865e0fddb8ef946dae23f670dc9cb56efaadc5ccebfed2",
+      "bytes": 2258540
+    },
+    "v21": {
+      "source": "history-step-pack-v21/v21-runtime-metadata.bin",
+      "sha256": "549c1e23d1fdca9579dd12d571992a5416f6e8e2c250b7dfa21e81ea4e31cdd8",
+      "bytes": 3396424
+    },
+    "retirement0": {
+      "source": "history-step-pack-v2/retirement-keys/class-0.key",
+      "sha256": "02421f91a13d34480e71e3f8a88071d7e8dcb10ac9ca2339f8a2dea7cb8a689c",
+      "bytes": 304
+    },
+    "retirement1": {
+      "source": "history-step-pack-v2/retirement-keys/class-1.key",
+      "sha256": "c655cbb3c3f485b3654d4a0c5d69f108eda504a3a34769a5579aad1fe3b9e8c8",
+      "bytes": 304
+    }
+  },
+  "matrix_caches": {
+    "v2-large": {
+      "source": "v2-large.spancache",
+      "sha256": "3b48b82d9bc2507b781101a059373f3ac674ae666821d1d7d4ee3147e30f37fe",
+      "bytes": 1048744
+    },
+    "v2-small": {
+      "source": "v2-small.spancache",
+      "sha256": "901b4d775651415d6cda39c89c555f67a2efdd734eb5d35c724a92e46016b8c7",
+      "bytes": 524456
+    },
+    "v21-large": {
+      "source": "v21-large.spancache",
+      "sha256": "6620319ae57dd0afbfa383b8b39f43cf02087a0d55935a68d1efc6046d08d6e1",
+      "bytes": 1048744
+    },
+    "v21-native": {
+      "source": "v21-native.spancache",
+      "sha256": "f1daa29c53f720fcdcdbad8cf95b99b73fa0e52e28fe04e33b5cd4aa8b614b0d",
+      "bytes": 1048744
+    },
+    "v21-small": {
+      "source": "v21-small.spancache",
+      "sha256": "f05255422782c6631f420a916e401474a75a62b4a726a15c0e1e9cdbaafe746f",
+      "bytes": 524456
+    }
+  }
+}

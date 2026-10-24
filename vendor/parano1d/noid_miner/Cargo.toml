@@ -1,0 +1,29 @@
+[package]
+name = "noid_miner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+noid_chain    = { path = "../noid_chain" }
+noid_core     = { path = "../noid_core" }
+noid_poseidon2b = { path = "../noid_poseidon2b" }
+noid_block    = { path = "../noid_block" }
+noid_gkr      = { path = "../noid_gkr" }
+noid_recursive = { path = "../noid_recursive" }
+noid-ivc-core = { path = "../noid_ivc_core" }
+noid-ivc-prover = { path = "../noid_ivc_prover" }
+noid_tx       = { path = "../noid_tx" }
+noid_mempool  = { path = "../noid_mempool" }
+hex           = "0.4"
+libc          = "0.2"
+rayon         = "1"
+tokio         = { workspace = true }
+tracing       = { workspace = true }
+thiserror     = { workspace = true }
+anyhow        = { workspace = true }
+bincode       = "1"
+zstd          = { version = "0.13", features = ["zstdmt"] }
+
+[dev-dependencies]
+tempfile = "3"

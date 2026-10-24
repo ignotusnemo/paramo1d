@@ -1,0 +1,23 @@
+[package]
+name = "noid-ivc-prover"
+version.workspace = true
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Paranoid recursive proof prover over GF(2)."
+
+[features]
+# Forwarded to noid-ivc-core.
+hash-count = ["noid-ivc-core/hash-count"]
+unsound-challenger = ["noid-ivc-core/unsound-challenger"]
+
+[dependencies]
+noid-ivc-core = { path = "../noid_ivc_core" }
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+
+[dev-dependencies]
+noid-ivc-core = { path = "../noid_ivc_core", features = ["unsound-challenger"] }
+noid_core = { path = "../noid_core" }
+noid_poseidon2b = { path = "../noid_poseidon2b" }

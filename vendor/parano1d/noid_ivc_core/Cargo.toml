@@ -1,0 +1,29 @@
+[package]
+name = "noid-ivc-core"
+version.workspace = true
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Paranoid recursive proof core over GF(2)."
+
+[features]
+# Count hash invocations via global relaxed atomics. Off by default.
+hash-count = []
+# Compile the insecure `RandomChallenger` into a non-test build. Never enable
+# it for builds that produce real proofs.
+unsound-challenger = []
+
+[dependencies]
+sha2 = "0.10"
+rayon = "1"
+noid_core = { path = "../noid_core" }
+noid_poseidon2b = { path = "../noid_poseidon2b" }
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+toml = "0.8"
+memmap2 = "0.9"
+tempfile = "3"
+
+[dev-dependencies]
+# Used by `LigeritoSecurityConfig` serde round-trip tests.
+serde_json = "1"

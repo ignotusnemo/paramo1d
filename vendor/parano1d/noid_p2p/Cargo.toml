@@ -1,0 +1,36 @@
+[package]
+name = "noid_p2p"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+noid_chain    = { path = "../noid_chain" }
+noid_tx       = { path = "../noid_tx" }
+noid_mempool = { path = "../noid_mempool" }
+noid_poseidon2b = { path = "../noid_poseidon2b" }
+libp2p       = { version = "0.55", features = [
+    "tokio", "tcp", "noise", "yamux", "dns",
+    "gossipsub", "request-response", "cbor", "identify",
+    "ping", "macros", "kad", "mdns",
+    # NAT traversal
+    "relay",     # circuit relay v2 (client + server modes)
+    "dcutr",     # direct connection upgrade through relay (hole punching)
+] }
+libp2p-connection-limits = "0.5"
+futures  = "0.3"
+tokio      = { workspace = true }
+tracing    = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+anyhow     = { workspace = true }
+async-trait = "0.1"
+libc = "0.2"
+rand = "0.8"
+zstd = "0.13"
+blake3 = "1"
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = "3"

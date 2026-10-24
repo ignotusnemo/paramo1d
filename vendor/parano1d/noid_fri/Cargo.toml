@@ -1,0 +1,11 @@
+[package]
+name = "noid_fri"
+version.workspace = true
+edition = "2021"
+
+[dependencies]
+noid_core = { path = "../noid_core" }
+noid_poseidon2b = { path = "../noid_poseidon2b" }
+rayon = "1.10"
+rand = "0.8"
+serde = { version = "1.0", features = ["derive"] }

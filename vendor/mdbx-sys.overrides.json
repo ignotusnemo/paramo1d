@@ -1,0 +1,6 @@
+{
+  "purpose": "Android system iovec ABI binding",
+  "files": {
+    "build.rs": "e86f85417b3bd8936808ba9fc7235099e3b73b4d4a9090d48c9a957cc289d31f"
+  }
+}

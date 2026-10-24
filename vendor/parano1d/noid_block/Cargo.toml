@@ -1,0 +1,13 @@
+[package]
+name = "noid_block"
+version.workspace = true
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+noid_core       = { path = "../noid_core" }
+noid_poseidon2b = { path = "../noid_poseidon2b" }
+noid_tx         = { path = "../noid_tx" }
+noid_gkr        = { path = "../noid_gkr" }
+noid_chain      = { path = "../noid_chain" }
+noid_recursive  = { path = "../noid_recursive" }

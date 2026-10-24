@@ -1,0 +1,48 @@
+[workspace]
+resolver = "2"
+exclude = ["vendor/parano1d", "vendor/mdbx-sys"]
+
+[package]
+name = "paramo1d"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Independent mobile verification for Parano1d"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+isolated-testnet = ["noid_chain/isolated-v2-1-fork-testnet"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+sha2 = "0.10"
+rayon = "1"
+tempfile = "3"
+zstd = { version = "0.13", default-features = false }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+libmdbx = "0.6"
+noid_chain = { path = "vendor/parano1d/noid_chain" }
+noid_core = { path = "vendor/parano1d/noid_core" }
+noid_recursive = { path = "vendor/parano1d/noid_recursive" }
+noid_miner = { path = "vendor/parano1d/noid_miner" }
+noid-ivc-core = { path = "vendor/parano1d/noid_ivc_core" }
+noid_poseidon2b = { path = "vendor/parano1d/noid_poseidon2b" }
+noid_p2p = { path = "vendor/parano1d/noid_p2p" }
+libp2p = { version = "0.55", features = ["tokio", "tcp", "noise", "yamux", "dns", "request-response", "identify", "ping", "macros"] }
+futures = "0.3"
+tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+
+[patch.crates-io]
+mdbx-sys = { path = "vendor/mdbx-sys" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

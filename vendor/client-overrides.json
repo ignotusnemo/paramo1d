@@ -1,0 +1,17 @@
+{
+  "purpose": "Bounded-memory access to unchanged authenticated matrix claims",
+  "files": {
+    "Cargo.toml": "0ee6bdf52d0880c528564d57ba895eeb3199257a03b9ad9c933904b9eaebda4f",
+    "noid_ivc_core/src/field_r1cs.rs": "5af449450f7b8948fc86ad34f0b9f80c90a1b2f93ecea85991ab687bea6d33ae",
+    "noid_ivc_core/src/matrix_claim/c1.rs": "f58168a16f84d7a6ccbad65d19bc1285a59359ed5d4b4ee7b7f52d2e3c2fe410",
+    "noid_recursive/src/acceptance/history_step/v2/capacity_banked.rs": "bff619847c8bef78ba731b7b54068f8364378fb083e150c44ab32038a404a257",
+    "noid_recursive/src/acceptance/history_step/v2/banked.rs": "2057abfd5eb33430eb831575aeb19911651b427b8e1c2e5642c0d7875a819bc5",
+    "noid_recursive/src/acceptance/history_step/v2/capacity_banked/decision.rs": "5fea0610e7e408fdbe7fb803ea16103032edf98d1beb9eb66091901e5c960994",
+    "noid_recursive/src/acceptance/history_step/v2/banked/decision.rs": "b9e77f9f2594f4f18b7b2a9073e019fd160550e34de905560460d5a485a4c684",
+    "noid_ivc_core/Cargo.toml": "fb4847b1a219cbd7880510a52bf186d3b4ca600e8f446ac1a2d6c73ec055622e",
+    "noid_chain/src/consensus/header.rs": "5176679c855e3a4b5c765d5544918b675a2d27a2d9d91f10a4d8f97780c4a13a",
+    "noid_p2p/src/header_protocol.rs": "33dbf69b995cfb79be97f193a02b14c7050fd1301291dbb6555e46233a06e937",
+    "noid_p2p/src/object_protocol.rs": "96ed77d84ae3e385ae2d6b3f49a04a46eed7ea6e12efdd614f86bb85d865336b",
+    "noid_p2p/src/protocol.rs": "39739a70dd8e1b86e29302f9b7c034d73263f470b910c802c4db20ada5dcf44c"
+  }
+}

@@ -1,0 +1,50 @@
+[workspace]
+members = [
+    "noid_core",
+    "noid_poseidon2b",
+    "noid_fri",
+    "noid_fri_binius",
+    "noid_gkr",
+    "noid_tx",
+    "noid_ivc_core",
+    "noid_ivc_prover",
+    "noid_chain",
+    "noid_recursive",
+    "noid_block",
+    "noid_mempool",
+    "noid_miner",
+    "noid_p2p"
+]
+resolver = "2"
+
+[workspace.package]
+version = "2.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+tokio       = { version = "1", features = ["full"] }
+tracing     = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+anyhow      = "1"
+thiserror   = "1"
+
+# HistoryStep is dominated by two large cross-crate prover phases. Thin LTO
+# plus one codegen unit removes cross-crate abstraction and codegen overhead.
+# This changes executable code only; proof relations and frozen matrix bytes
+# remain identical.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# The node build script authenticates the frozen v2 matrices. Explicit targets
+# compile its host dependencies separately, so optimize that work as well.
+[profile.release.build-override]
+opt-level = 3
+codegen-units = 1
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1
