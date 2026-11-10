@@ -1,6 +1,21 @@
 # Paramo1d
 
-An Android messenger with a Parano1d node, encrypted direct conversations and native NOID payments. The phone verifies blockchain State and payment receipts. Nearby participants can exchange messages and carry approved payments over Bluetooth.
+**A full Parano1d node, native NOID wallet and encrypted messenger for Android.**
+
+Send, receive and request NOID directly inside a chat. Your phone holds the spending secret, authorizes payments and verifies the blockchain. Connect through ordinary internet, turn on the built-in protected connection, or exchange messages and authorized payments with nearby participants over Bluetooth.
+
+## Inside the app
+
+- **A blockchain node on your phone.** Connect directly to mainnet peers and independently verify the chain, recursive State proofs and payment receipts.
+- **NOID payments in your conversations.** Send NOID, share a receiving address, request an amount with a memo and check the returned payment receipt.
+- **One public community and encrypted private chats.** Share contact links or QR codes and receive messages in the background.
+- **Ordinary internet.** Chat, synchronize the node and deliver payments through your normal mobile or Wi-Fi connection.
+- **Built-in App VPN.** Use an app-only AmneziaWG protected channel with authenticated HTTPS fallback. Other applications keep their own connection.
+- **Bluetooth without internet.** Exchange encrypted messages, already-authorized payment packets and receipts with nearby participants.
+- **Community-assisted payment delivery.** Authorize a payment from your saved verified wallet view. A connected participant can forward it to the network. The spending secret stays on your phone.
+- **Local access and recovery.** Fingerprint or screen-lock entry, encrypted portable backups and light, dark or system appearance.
+
+Payments settle on the Parano1d network. Bluetooth carries the authorization and receipt between participants. Your own node checks the receipt against its accepted chain.
 
 ## Install
 
@@ -8,21 +23,13 @@ Download the ARM64 APK from [Releases](https://github.com/ignotusnemo/paramo1d/r
 
 Release downloads include APK hashes and the public signing-certificate fingerprint. Updates use the same release signing key.
 
-## Chat and payments
+## The node and wallet
 
-- One public community chat and encrypted direct conversations.
-- Native NOID payment requests, local authorization and checked inclusion receipts.
-- Bluetooth delivery for messages, authorized payments and receipts.
-- Configurable internet relays and an app-only protected AmneziaWG connection with HTTPS fallback.
-- Background messages, fingerprint or screen-lock entry and encrypted portable backups.
+The node retrieves headers and recursive proofs over Parano1d P2P. It checks the header chain from genesis, proof of work, fork certificates and the recursive State proof on the device. Its accepted chain and State roots authenticate wallet inputs and payment receipts.
 
-A participant can forward an already-approved payment using its existing authorization. The phone verifies received evidence against its own accepted chain.
+The wallet uses a configurable RPC endpoint for coin discovery, slot-proof delivery and transaction submission. It checks returned slot proofs against its independently verified State root. Internet chats use configurable delivery relays. These services provide data and delivery. Payment authorization and blockchain verification run on the phone.
 
-Direct messages use X25519 and XSalsa20-Poly1305. NOID authorization uses the production Owner proof protocol. The community chat and blockchain payments are public.
-
-## Verification on the phone
-
-The node checks the header chain from genesis, proof of work, fork certificates and the recursive State proof. Wallet inputs and payment receipts are authenticated against accepted headers and State roots.
+Direct messages use X25519 and XSalsa20-Poly1305. NOID payments use Parano1d's post-quantum Owner authorization protocol. The community chat and blockchain payments are public.
 
 While the app is open and unlocked, small queries watch for changes to the wallet's coins. Changed coins trigger State and membership verification. The node stops when the app is minimized or locked. Background message delivery continues independently.
 
