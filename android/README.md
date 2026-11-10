@@ -1,6 +1,8 @@
 # Paramo1d for Android
 
-Paramo1d combines one public community chat, encrypted direct conversations and native NOID payments. The wallet prepares and authorizes payments on the device. Participants can carry messages and authorized payments over Bluetooth, broadcast payments when internet access becomes available and return inclusion receipts.
+Paramo1d combines a full Parano1d node, native NOID wallet and encrypted messenger on Android. Send, receive and request NOID directly inside a chat. Use ordinary internet, enable the built-in app-only protected connection or exchange messages, authorized payments and receipts with nearby participants over Bluetooth.
+
+The wallet prepares and authorizes payments on the device. A connected participant can broadcast an already-authorized payment and return its inclusion receipt. The phone's own node verifies the chain and checks the receipt.
 
 The application uses the existing mainnet transaction format, Owner authorization and recursive State verifier. The consensus source and release pins remain in `vendor/` and `profiles/mainnet.json`.
 

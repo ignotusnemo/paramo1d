@@ -1,9 +1,11 @@
-Paramo1d combines a Parano1d node, community chat, encrypted direct messages and native NOID payments on Android.
+Paramo1d brings a full Parano1d node, native NOID wallet and encrypted messenger to Android.
 
-- Verify blockchain State, wallet inputs and payment receipts on the phone.
-- Exchange messages, authorized payments and receipts through Bluetooth.
-- Request NOID inside a direct conversation and let another participant relay an approved payment.
-- Use the app's protected AmneziaWG connection or HTTPS fallback on restricted networks.
+- Send, receive and request NOID directly inside a chat.
+- Join the public community or start an encrypted private conversation.
+- Connect to mainnet peers and verify blockchain State, wallet inputs and payment receipts on the phone.
+- Use ordinary mobile or Wi-Fi internet, or enable the built-in app-only AmneziaWG protected connection with HTTPS fallback.
+- Exchange encrypted messages, authorized payments and receipts over Bluetooth without internet.
+- Authorize a payment from the saved verified wallet view and let a connected participant deliver it to the network.
 - Receive background messages and protect local access with the phone's fingerprint or screen lock.
 - Save an encrypted portable backup of the wallet and chat archive.
 
