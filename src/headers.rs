@@ -190,6 +190,7 @@ impl CheckedHeaders {
         let terminal_output = std::env::var_os("PARAMO1D_TERMINAL").is_some();
         let mut encoded = vec![0; HEADER_CHUNK * BLOCK_HEADER_WIRE_SIZE];
         for first in (reused.max(1)..count).step_by(HEADER_CHUNK) {
+            crate::mobile_control::check()?;
             let length = (count - first).min(HEADER_CHUNK as u64) as usize;
             file.seek(SeekFrom::Start(first * BLOCK_HEADER_WIRE_SIZE as u64))?;
             let chunk = &mut encoded[..length * BLOCK_HEADER_WIRE_SIZE];

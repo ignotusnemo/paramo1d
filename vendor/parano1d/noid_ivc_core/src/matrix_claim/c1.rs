@@ -1149,13 +1149,15 @@ fn compact_matrix_claim_values_c1(
     r1cs: &CompactFieldR1cs,
     fresh: Option<&C1FreshLincheckClaim>,
     accumulated: Option<&C1MatrixAccClaim>,
-) -> (Option<F256>, Option<F256>) {
+    cancelled: Option<&(dyn Fn() -> bool + Sync)>,
+) -> (Option<F256>, Option<F256>, bool) {
+    let interrupted=std::sync::atomic::AtomicBool::new(false);
     let shape = r1cs.shape();
     let fresh_weights = fresh.map(|claim| CompactC1FreshWeights::new(shape, claim));
     let accumulated_weights =
         accumulated.map(|claim| CompactC1AccumulatedWeights::new(shape, claim));
     if fresh_weights.is_none() && accumulated_weights.is_none() {
-        return (None, None);
+        return (None, None, false);
     }
 
     let (fresh_total, accumulated_total) = [FieldR1csArtifactMatrix::A, FieldR1csArtifactMatrix::B]
@@ -1166,6 +1168,10 @@ fn compact_matrix_claim_values_c1(
                 .map_init(
                     || [CompactC1ColumnWeights::EMPTY; 128],
                     |column_weights, group| {
+                        if cancelled.is_some_and(|check|check()) {
+                            interrupted.store(true,std::sync::atomic::Ordering::Relaxed);
+                            return (F256::ZERO,F256::ZERO);
+                        }
                         let mut fresh_sum = F256::ZERO;
                         let mut accumulated_sum = F256::ZERO;
                         let mut cached_row = usize::MAX;
@@ -1243,6 +1249,7 @@ fn compact_matrix_claim_values_c1(
     (
         fresh.map(|_| fresh_total),
         accumulated.map(|_| accumulated_total),
+        interrupted.load(std::sync::atomic::Ordering::Relaxed),
     )
 }
 
@@ -1253,8 +1260,8 @@ impl CompactFieldR1cs {
         accumulated: Option<&C1MatrixAccClaim>,
     ) -> Result<AuthenticatedC1MatrixClaimEvaluations, FieldR1csArtifactError> {
         validate_claim_shapes(self.shape(), fresh, accumulated)?;
-        let (fresh_value, accumulated_value) =
-            compact_matrix_claim_values_c1(self, fresh, accumulated);
+        let (fresh_value, accumulated_value, _) =
+            compact_matrix_claim_values_c1(self, fresh, accumulated,None);
         Ok(AuthenticatedC1MatrixClaimEvaluations::new(
             self.statement_digest(),
             fresh,
@@ -1262,6 +1269,19 @@ impl CompactFieldR1cs {
             fresh_value,
             accumulated_value,
         ))
+    }
+    pub fn evaluate_matrix_claims_c1_cancellable(
+        &self,
+        fresh: Option<&C1FreshLincheckClaim>,
+        accumulated: Option<&C1MatrixAccClaim>,
+        cancelled: &(impl Fn()->bool+Sync),
+    ) -> Result<AuthenticatedC1MatrixClaimEvaluations,FieldR1csArtifactError> {
+        validate_claim_shapes(self.shape(),fresh,accumulated)?;
+        let (fv,av,interrupted)=compact_matrix_claim_values_c1(self,fresh,accumulated,Some(cancelled));
+        if interrupted || cancelled() {
+            return Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted,"matrix evaluation paused").into());
+        }
+        Ok(AuthenticatedC1MatrixClaimEvaluations::new(self.statement_digest(),fresh,accumulated,fv,av))
     }
 }
 
@@ -1673,6 +1693,10 @@ fn canonical_span_claims_c1(
                 .expect("canonical row count"),
         ) as usize;
         cursor += 8;
+        if count == 0 {
+            row += 1;
+            continue;
+        }
         let (mut fresh_columns, mut accumulated_columns) = (F256::ZERO, F256::ZERO);
         for _ in 0..count {
             let column = u64::from_le_bytes(

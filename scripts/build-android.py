@@ -2,6 +2,7 @@
 """Build the ARM64 Android verification library with an installed NDK."""
 import argparse
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -23,6 +24,13 @@ env.update({
     "BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android":
         "--sysroot=" + str(toolchain / "sysroot") + " --target=aarch64-linux-android26",
 })
+# Android verification requires NEON and PMULL. Compile their arithmetic
+# directly so field operations can inline across the protocol kernels.
+flags = env.get("CARGO_ENCODED_RUSTFLAGS")
+flags = flags.split("\x1f") if flags is not None else shlex.split(env.get("RUSTFLAGS", ""))
+flags += ["-C", "target-feature=+neon,+aes"]
+env["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(flags)
+env.pop("RUSTFLAGS", None)
 command = ["cargo", "build", "--locked", "--release", "--target", "aarch64-linux-android", "--lib"]
 if args.cli:
     command += ["--bin", "paramo1d"]

@@ -4173,6 +4173,48 @@ impl fmt::Debug for CompactFieldR1cs {
 }
 
 impl CompactFieldR1cs {
+    /// Authenticate canonical bytes using an independently pinned C1 span
+    /// cache, then retain immutable rows for repeated parallel evaluation.
+    /// The complete canonical payload and final structural root are checked.
+    /// `cache_digest` has the same release-authority contract as
+    /// `SeekableFieldR1csArtifact::restore_c1_span_cache`.
+    pub fn open_with_c1_span_cache(
+        bytes: Box<[u8]>,
+        expected_shape: crate::proof::FieldShape,
+        expected_structural_digest: [u8; 32],
+        cache: &[u8],
+        cache_digest: [u8; 32],
+        cancelled: impl Fn() -> bool,
+    ) -> Result<Self, FieldR1csArtifactError> {
+        struct CheckedCursor<'a,F> { cursor: std::io::Cursor<&'a [u8]>, cancelled:F }
+        impl<F:Fn()->bool> Read for CheckedCursor<'_,F> {
+            fn read(&mut self, out:&mut [u8]) -> io::Result<usize> {
+                if (self.cancelled)() {return Err(io::Error::new(io::ErrorKind::ConnectionAborted,"matrix load paused"));}
+                self.cursor.read(out)
+            }
+        }
+        impl<F:Fn()->bool> Seek for CheckedCursor<'_,F> {
+            fn seek(&mut self, position:SeekFrom)->io::Result<u64> {
+                if (self.cancelled)() {return Err(io::Error::new(io::ErrorKind::ConnectionAborted,"matrix load paused"));}
+                self.cursor.seek(position)
+            }
+        }
+        let reader=CheckedCursor{cursor:std::io::Cursor::new(bytes.as_ref()),cancelled};
+        let mut authenticated=SeekableFieldR1csArtifact::preflight_for_c1(
+            reader,expected_shape,expected_structural_digest,bytes.len() as u64,
+        )?;
+        authenticated.restore_c1_span_cache(cache,cache_digest)?;
+        crate::matrix_claim::c1::C1MatrixClaimEvaluator::evaluate_matrix_claims_c1(&mut authenticated,None,None)?;
+        let useful_rows=authenticated.useful_rows;
+        let layouts=authenticated.layouts;
+        let a=build_compact_matrix_index(&bytes,&mut authenticated,layouts[0])?;
+        let b=build_compact_matrix_index(&bytes,&mut authenticated,layouts[1])?;
+        drop(authenticated);
+        let backing=CompactArtifactBacking::Canonical(bytes);
+        let matrices=[a,b];
+        Ok(Self{backing,shape:expected_shape,useful_rows,statement_digest:expected_structural_digest,matrices,build_authenticated:false})
+    }
+
     /// Authenticate an immutable canonical artifact and build its small
     /// parallel group index without ever materializing CSR arrays.
     pub fn open(

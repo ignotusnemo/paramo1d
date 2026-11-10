@@ -1,0 +1,13 @@
+Paramo1d
+
+Apache License 2.0. See LICENSE-Apache-2.0.txt.
+
+The application uses Parano1d verification code, AndroidX WebKit,
+OkHttp, Okio and Kotlin runtime components.
+
+The application tunnel includes AmneziaWG Go, gVisor netstack,
+Gorilla WebSocket and Go libraries. Full license texts and pinned
+versions are in LICENSE-tunnel.txt.
+
+IBM Plex font licenses are in fonts/.
+QR encoder attribution is in LICENSE-qrcode.txt.

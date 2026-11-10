@@ -1,0 +1,6 @@
+{
+  "name": "paramo1d-ui-checks",
+  "private": true,
+  "scripts": { "test": "node ui.test.cjs" },
+  "devDependencies": { "playwright": "1.63.0" }
+}

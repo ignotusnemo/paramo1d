@@ -1,0 +1,42 @@
+plugins { id 'com.android.application' }
+
+def releaseStore = System.getenv('PARAMO1D_ANDROID_KEYSTORE_PATH')
+
+android {
+    namespace 'org.parano1d.courier'
+    compileSdk 36
+    buildToolsVersion '36.0.0'
+    buildFeatures { buildConfig true }
+    defaultConfig {
+        applicationId 'org.parano1d.courier'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0'
+        ndk { abiFilters 'arm64-v8a' }
+    }
+    signingConfigs {
+        if (releaseStore) {
+            release {
+                storeFile file(releaseStore)
+                storePassword System.getenv('PARAMO1D_ANDROID_STORE_PASSWORD')
+                keyAlias System.getenv('PARAMO1D_ANDROID_KEY_ALIAS')
+                keyPassword System.getenv('PARAMO1D_ANDROID_STORE_PASSWORD')
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            debuggable false
+            if (releaseStore) signingConfig signingConfigs.release
+        }
+    }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+    packaging { jniLibs { useLegacyPackaging = true } }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.13.0'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+}

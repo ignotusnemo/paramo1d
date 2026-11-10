@@ -1,7 +1,7 @@
 use crate::matrix_store::{write_chunked, MatrixReader};
 use anyhow::{ensure, Context, Result};
 use noid_ivc_core::{
-    field_r1cs::SeekableFieldR1csArtifact,
+    field_r1cs::{CompactFieldR1cs, SeekableFieldR1csArtifact},
     matrix_claim::c1::{
         AuthenticatedC1MatrixClaimEvaluations, C1FreshLincheckClaim, C1MatrixAccClaim,
         C1MatrixClaimEvaluator,
@@ -18,11 +18,14 @@ use noid_recursive::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, OnceLock, Weak,
+    },
 };
 
 pub const MAX_MATRIX_BYTES: u64 = 1024 * 1024 * 1024;
@@ -61,7 +64,7 @@ pub fn read_bounded(path: &Path, cap: u64) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn pinned(directory: &Path, name: &str) -> Result<Vec<u8>> {
+pub(crate) fn pinned(directory: &Path, name: &str) -> Result<Vec<u8>> {
     let profile = profile();
     let pin = profile
         .artifacts
@@ -206,19 +209,153 @@ impl v21::MatrixSource for UnavailableRows {
     }
 }
 
+const COMPACT_CACHE_BYTES: u64 = 512 * 1024 * 1024;
+const COMPACT_CACHE_TOTAL: u64 = 640 * 1024 * 1024;
+pub(crate) const FOREGROUND_MATRIX_CACHE: u64 = COMPACT_CACHE_TOTAL;
+pub(crate) const BACKGROUND_MATRIX_CACHE: u64 = 192 * 1024 * 1024;
+static CACHE_BUDGET: AtomicU64 = AtomicU64::new(COMPACT_CACHE_TOTAL);
+static CACHE_REGISTRY: OnceLock<Mutex<Vec<Weak<Mutex<CompactCache>>>>> = OnceLock::new();
+pub(crate) fn matrix_cache_budget(bytes: u64) {
+    CACHE_BUDGET.store(bytes.min(COMPACT_CACHE_TOTAL), Ordering::Relaxed);
+    if let Some(registry) = CACHE_REGISTRY.get() {
+        if let Ok(mut registry) = registry.try_lock() {
+            registry.retain(|weak| {
+                let Some(cache) = weak.upgrade() else {
+                    return false;
+                };
+                if let Ok(mut cache) = cache.try_lock() {
+                    cache.trim_to(bytes);
+                }
+                true
+            });
+        }
+    }
+}
+struct CompactEntry {
+    path: PathBuf,
+    digest: [u8; 32],
+    relation: Arc<CompactFieldR1cs>,
+    bytes: u64,
+}
+#[derive(Default)]
+struct CompactCache {
+    entries: VecDeque<CompactEntry>,
+    bytes: u64,
+}
+impl CompactCache {
+    fn trim_to(&mut self, budget: u64) {
+        while self.bytes > budget {
+            let at = self
+                .entries
+                .iter()
+                .position(|entry| entry.bytes > budget)
+                .unwrap_or(0);
+            let Some(entry) = self.entries.remove(at) else {
+                break;
+            };
+            self.bytes -= entry.bytes;
+        }
+    }
+}
+type SharedCompactCache = Arc<Mutex<CompactCache>>;
 struct MatrixFile {
     path: PathBuf,
     shape: FieldShape,
     digest: [u8; 32],
     cache_pin: Option<ArtifactPin>,
     reader: Mutex<Option<SeekableFieldR1csArtifact<MatrixReader>>>,
+    compact: SharedCompactCache,
 }
 impl MatrixFile {
+    fn compact_relation(&self) -> Result<Option<Arc<CompactFieldR1cs>>, V2Error> {
+        let Some(pin) = &self.cache_pin else {
+            return Ok(None);
+        };
+        let mut cache = self.compact.lock().map_err(|_| V2Error::Matrix)?;
+        let budget = CACHE_BUDGET.load(Ordering::Relaxed);
+        cache.trim_to(budget);
+        if let Some(at) = cache
+            .entries
+            .iter()
+            .position(|entry| entry.path == self.path && entry.digest == self.digest)
+        {
+            let entry = cache
+                .entries
+                .remove(at)
+                .expect("located matrix cache entry");
+            let relation = Arc::clone(&entry.relation);
+            cache.entries.push_back(entry);
+            return Ok(Some(relation));
+        }
+        let mut input =
+            MatrixReader::open(&self.path, MAX_MATRIX_BYTES).map_err(|_| V2Error::Matrix)?;
+        let length = input.decoded_len().map_err(|_| V2Error::Matrix)?;
+        if length > COMPACT_CACHE_BYTES || length > budget {
+            return Ok(None);
+        }
+        while cache.bytes + length > budget {
+            let Some(at) = cache
+                .entries
+                .iter()
+                .position(|entry| Arc::strong_count(&entry.relation) == 1)
+            else {
+                return Ok(None);
+            };
+            let entry = cache.entries.remove(at).expect("located evictable matrix");
+            cache.bytes -= entry.bytes;
+        }
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(length as usize)
+            .map_err(|_| V2Error::Matrix)?;
+        bytes.resize(length as usize, 0);
+        input.read_exact(&mut bytes).map_err(|_| V2Error::Matrix)?;
+        if input.read(&mut [0; 1]).map_err(|_| V2Error::Matrix)? != 0 {
+            return Err(V2Error::Matrix);
+        }
+        let spans = read_bounded(&self.path.with_extension("spancache"), pin.bytes as u64)
+            .map_err(|_| V2Error::Matrix)?;
+        let hash = hex::decode(&pin.sha256)
+            .map_err(|_| V2Error::Matrix)?
+            .try_into()
+            .map_err(|_| V2Error::Matrix)?;
+        let relation = Arc::new(
+            CompactFieldR1cs::open_with_c1_span_cache(
+                bytes.into_boxed_slice(),
+                self.shape,
+                self.digest,
+                &spans,
+                hash,
+                || {
+                    crate::mobile_control::check().is_err()
+                        || length > CACHE_BUDGET.load(Ordering::Relaxed)
+                },
+            )
+            .map_err(|_| V2Error::Matrix)?,
+        );
+        cache.bytes += length;
+        cache.entries.push_back(CompactEntry {
+            path: self.path.clone(),
+            digest: self.digest,
+            relation: Arc::clone(&relation),
+            bytes: length,
+        });
+        Ok(Some(relation))
+    }
     fn evaluate(
         &self,
         fresh: Option<&C1FreshLincheckClaim>,
         accumulated: Option<&C1MatrixAccClaim>,
     ) -> Result<AuthenticatedC1MatrixClaimEvaluations, V2Error> {
+        if let Some(compact) = self.compact_relation()? {
+            let cancellation = crate::mobile_control::token();
+            return compact
+                .evaluate_matrix_claims_c1_cancellable(fresh, accumulated, &|| {
+                    cancellation.as_ref().is_some_and(|t| t.is_cancelled())
+                        || CACHE_BUDGET.load(Ordering::Relaxed) == 0
+                })
+                .map_err(|_| V2Error::Matrix);
+        }
         let mut reader = self.reader.lock().map_err(|_| V2Error::Matrix)?;
         if reader.is_none() {
             let file =
@@ -292,6 +429,12 @@ pub enum MatrixMode {
 
 impl Runtime {
     pub fn load(directory: &Path, mode: MatrixMode) -> Result<Self> {
+        let compact = Arc::new(Mutex::new(CompactCache::default()));
+        CACHE_REGISTRY
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Matrix cache registry"))?
+            .push(Arc::downgrade(&compact));
         let bytes = pinned(directory, "legacy")?;
         let digest = bytes[bytes.len() - 32..].try_into()?;
         let metadata = noid_miner::decode_history_step_runtime_metadata_pinned(&bytes, digest)?;
@@ -325,6 +468,7 @@ impl Runtime {
                         .get(&format!("v2-{}", class_name(c.index())))
                         .cloned(),
                     reader: Mutex::new(None),
+                    compact: Arc::clone(&compact),
                 });
                 v2::Runtime::new(bank, parts, Box::new(UnavailableRows))
                     .map_err(|e| anyhow::anyhow!("v2 runtime: {e}"))?
@@ -378,6 +522,7 @@ impl Runtime {
                         .get(&format!("v21-{}", class_name(c.index())))
                         .cloned(),
                     reader: Mutex::new(None),
+                    compact: Arc::clone(&compact),
                 });
                 v21::Runtime::new(bank, parts, Box::new(UnavailableRows))
                     .map_err(|e| anyhow::anyhow!("v2.1 runtime: {e}"))?
@@ -440,5 +585,157 @@ impl HistoryStepMatrixSource for RetiredRows {
         _: CanonicalHistoryStepClassId,
     ) -> Result<HistoryStepMatrixLease, noid_recursive::HistoryStepMatrixSourceError> {
         Err(noid_recursive::HistoryStepMatrixSourceError)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use noid_ivc_core::{
+        field::{F128, F256},
+        field_r1cs::{FieldR1cs, SparseFieldMatrix},
+    };
+    use std::{io::Cursor, sync::OnceLock};
+
+    fn value(seed: u64) -> F256 {
+        F256::new(
+            F128::new(seed, seed.rotate_left(7)),
+            F128::new(!seed, seed ^ 0xC1),
+        )
+    }
+    #[test]
+    fn padded_matrix_claims_match_resident_evaluation() {
+        for empty in [false, true] {
+            let width = 4096;
+            let mut a = vec![vec![]; width];
+            let mut b = a.clone();
+            if !empty {
+                a[1] = vec![(0, F128::ONE), (7, F128::new(3, 5))];
+                a[8] = vec![(3, F128::new(9, 11))];
+                b[0] = vec![(2, F128::ONE)];
+                b[7] = vec![(8, F128::new(13, 17))];
+            }
+            let mut resident = FieldR1cs {
+                m: 12,
+                k_log: 12,
+                k_skip: 6,
+                useful_rows: 9,
+                a_0: SparseFieldMatrix::from_rows(width, a),
+                b_0: SparseFieldMatrix::from_rows(width, b),
+                const_pin: None,
+                digest_cache: OnceLock::new(),
+                csc_cache: OnceLock::new(),
+            };
+            let shape = FieldShape::of(&resident);
+            let digest = resident.structural_statement_digest();
+            let mut bytes = Vec::new();
+            resident.write_artifact(&mut bytes).unwrap();
+            let mut streamed = SeekableFieldR1csArtifact::preflight_for_c1(
+                Cursor::new(bytes.clone()),
+                shape,
+                digest,
+                bytes.len() as u64,
+            )
+            .unwrap();
+            let fresh = C1FreshLincheckClaim {
+                alpha: value(1),
+                z_skip: value(2),
+                x_inner_rest: (0..6).map(|i| value(10 + i)).collect(),
+                r_inner_rest: (0..6).map(|i| value(30 + i)).collect(),
+                z_partial: (0..64).map(|i| value(60 + i)).collect(),
+                value: F256::ZERO,
+            };
+            let acc = C1MatrixAccClaim {
+                point: (0..25).map(|i| value(100 + i)).collect(),
+                value: F256::ZERO,
+            };
+            for (f, a) in [
+                (None, None),
+                (Some(&fresh), None),
+                (None, Some(&acc)),
+                (Some(&fresh), Some(&acc)),
+            ] {
+                assert_eq!(
+                    streamed.evaluate_matrix_claims_c1(f, a).unwrap(),
+                    resident.evaluate_matrix_claims_c1(f, a).unwrap()
+                );
+            }
+            let spans = streamed.export_c1_span_cache().unwrap();
+            let cache_hash = Sha256::digest(&spans).into();
+            let compact = CompactFieldR1cs::open_with_c1_span_cache(
+                bytes.clone().into_boxed_slice(),
+                shape,
+                digest,
+                &spans,
+                cache_hash,
+                || false,
+            )
+            .unwrap();
+            for (f, a) in [
+                (None, None),
+                (Some(&fresh), None),
+                (None, Some(&acc)),
+                (Some(&fresh), Some(&acc)),
+            ] {
+                assert_eq!(
+                    compact
+                        .evaluate_matrix_claims_c1_authenticated(f, a)
+                        .unwrap(),
+                    resident.evaluate_matrix_claims_c1(f, a).unwrap()
+                );
+                assert_eq!(
+                    compact
+                        .evaluate_matrix_claims_c1_cancellable(f, a, &|| false)
+                        .unwrap(),
+                    resident.evaluate_matrix_claims_c1(f, a).unwrap()
+                );
+            }
+            let calls = std::sync::atomic::AtomicUsize::new(0);
+            assert!(compact
+                .evaluate_matrix_claims_c1_cancellable(Some(&fresh), Some(&acc), &|| calls
+                    .fetch_add(1, Ordering::Relaxed)
+                    == 1)
+                .is_err());
+            assert!(CompactFieldR1cs::open_with_c1_span_cache(
+                bytes.clone().into_boxed_slice(),
+                shape,
+                digest,
+                &spans,
+                cache_hash,
+                || true
+            )
+            .is_err());
+            let mut bad_cache = spans.clone();
+            *bad_cache.last_mut().unwrap() ^= 1;
+            assert!(CompactFieldR1cs::open_with_c1_span_cache(
+                bytes.clone().into_boxed_slice(),
+                shape,
+                digest,
+                &bad_cache,
+                cache_hash,
+                || false
+            )
+            .is_err());
+            *bytes.last_mut().unwrap() ^= 1;
+            assert!(CompactFieldR1cs::open_with_c1_span_cache(
+                bytes.clone().into_boxed_slice(),
+                shape,
+                digest,
+                &spans,
+                cache_hash,
+                || false
+            )
+            .is_err());
+            if let Ok(mut changed) = SeekableFieldR1csArtifact::preflight_for_c1(
+                Cursor::new(bytes.clone()),
+                shape,
+                digest,
+                bytes.len() as u64,
+            ) {
+                assert!(changed
+                    .evaluate_matrix_claims_c1(Some(&fresh), Some(&acc))
+                    .is_err());
+            }
+        }
     }
 }

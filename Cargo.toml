@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+members = ["courier", "relay"]
 exclude = ["vendor/parano1d", "vendor/mdbx-sys"]
 
 [package]
@@ -22,6 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
 sha2 = "0.10"
+hmac = "0.12"
 rayon = "1"
 tempfile = "3"
 zstd = { version = "0.13", default-features = false }
@@ -37,6 +39,16 @@ noid_p2p = { path = "vendor/parano1d/noid_p2p" }
 libp2p = { version = "0.55", features = ["tokio", "tcp", "noise", "yamux", "dns", "request-response", "identify", "ping", "macros"] }
 futures = "0.3"
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+paramo1d-courier = { path = "courier" }
+noid_tx = { path = "vendor/parano1d/noid_tx" }
+noid_gkr = { path = "vendor/parano1d/noid_gkr" }
+zeroize = { version = "1", features = ["zeroize_derive"] }
+base64 = "0.22"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+sha2 = { version = "0.10", features = ["asm-aarch64"] }
 
 [dev-dependencies]
 

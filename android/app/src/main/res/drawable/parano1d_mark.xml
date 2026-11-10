@@ -1,0 +1,10 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android" xmlns:aapt="http://schemas.android.com/aapt" android:width="108dp" android:height="108dp" android:viewportWidth="200" android:viewportHeight="200">
+    <path android:pathData="M100,3 A97,97 0,1 0,100,197 A97,97 0,1 0,100,3" android:strokeColor="#344B46" android:strokeWidth="5">
+        <aapt:attr name="android:fillColor"><gradient android:type="radial" android:centerX="70" android:centerY="56" android:gradientRadius="165" android:startColor="#32454A" android:endColor="#171D2A"/></aapt:attr>
+    </path>
+    <path android:pathData="M100,18 A82,82 0,1 0,100,182 A82,82 0,1 0,100,18" android:fillColor="#00000000" android:strokeWidth="24">
+        <aapt:attr name="android:strokeColor"><gradient android:startX="100" android:startY="0" android:endX="100" android:endY="200" android:startColor="#35F27D" android:endColor="#1EDC69"/></aapt:attr>
+    </path>
+    <path android:pathData="M100,32 A68,68 0,1 0,100,168 A68,68 0,1 0,100,32" android:fillColor="#00000000" android:strokeColor="#406365" android:strokeWidth="3"/>
+    <path android:pathData="M74,80 L100,59 L100,143" android:fillColor="#00000000" android:strokeColor="#2DE473" android:strokeWidth="22" android:strokeLineCap="round" android:strokeLineJoin="round"/>
+</vector>

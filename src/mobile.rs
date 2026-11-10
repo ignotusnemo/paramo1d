@@ -1,10 +1,14 @@
+use crate::{
+    artifacts::{self},
+    Verifier,
+};
 use anyhow::{bail, ensure, Context, Result};
 use futures::{stream::FuturesUnordered, StreamExt};
 use libp2p::{
-    identify, noise, ping,
+    identify, ping,
     request_response::{self as rr, Message, ProtocolSupport},
     swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux, Multiaddr, PeerId, StreamProtocol, SwarmBuilder,
+    Multiaddr, PeerId, StreamProtocol, SwarmBuilder,
 };
 use noid_chain::{
     block_header::{block_id, semantic_header_id},
@@ -27,11 +31,8 @@ use noid_p2p::{
     },
     state_manifest_codec::StateManifestCodec,
 };
-use paramo1d::{
-    artifacts::{self, MatrixMode},
-    Verifier,
-};
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, HashMap, HashSet},
     fs::{self, File},
     io::{Seek, SeekFrom, Write},
@@ -73,6 +74,52 @@ enum Command {
 struct Network {
     commands: mpsc::Sender<Command>,
     peers: watch::Receiver<Vec<PeerId>>,
+    lifecycle: Option<tokio_util::sync::CancellationToken>,
+}
+
+struct Connection {
+    bank: [u8; 32],
+    route: Option<crate::network_route::Route>,
+    network: Network,
+    executor: tokio::runtime::Runtime,
+}
+thread_local! { static CONNECTION: RefCell<Option<Connection>> = const { RefCell::new(None) }; }
+fn with_connection<T>(
+    bank: [u8; 32],
+    profile: NetworkProfile,
+    work: impl FnOnce(&tokio::runtime::Runtime, Network) -> Result<T>,
+) -> Result<T> {
+    CONNECTION.with(|slot| {
+        let mut slot = slot
+            .try_borrow_mut()
+            .map_err(|_| anyhow::anyhow!("Node connection is busy"))?;
+        let route = crate::network_route::current();
+        let usable = slot.as_ref().is_some_and(|c| {
+            c.bank == bank
+                && c.route == route
+                && !c.network.commands.is_closed()
+                && !c
+                    .network
+                    .lifecycle
+                    .as_ref()
+                    .is_some_and(|t| t.is_cancelled())
+        });
+        if !usable {
+            *slot = None;
+            let executor = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            let network = executor.block_on(Network::start(profile))?;
+            *slot = Some(Connection {
+                bank,
+                route,
+                network,
+                executor,
+            });
+        }
+        let connection = slot.as_ref().expect("node connection initialized");
+        work(&connection.executor, connection.network.clone())
+    })
 }
 
 fn protocols(suffix: &str, support: ProtocolSupport) -> Vec<(StreamProtocol, ProtocolSupport)> {
@@ -101,13 +148,13 @@ fn peak_memory_kib() -> Option<u64> {
 
 impl Network {
     async fn start(profile: NetworkProfile) -> Result<Self> {
-        let mut swarm = SwarmBuilder::with_new_identity()
+        let lifecycle = crate::mobile_control::token();
+        let stop = lifecycle.clone();
+        let identity = libp2p::identity::Keypair::generate_ed25519();
+        let transport = crate::network_route::transport(&identity)?;
+        let mut swarm = SwarmBuilder::with_existing_identity(identity)
             .with_tokio()
-            .with_tcp(
-                tcp::Config::default().nodelay(true),
-                noise::Config::new,
-                yamux::Config::default,
-            )?
+            .with_other_transport(|_| transport)?
             .with_behaviour(|key| Behaviour {
                 profile: rr::Behaviour::new(
                     protocols("/sync/profile/6", ProtocolSupport::Full),
@@ -154,7 +201,16 @@ impl Network {
         let (commands, mut receive) = mpsc::channel(32);
         let (peer_sender, peers) = watch::channel(Vec::new());
         let discovery_commands = commands.clone();
+        let protected = crate::network_route::current().is_some();
         tokio::spawn(async move {
+            if protected {
+                for host in NetworkConfig::mainnet().dns_seeds {
+                    if let Ok(address) = format!("/dns4/{host}/tcp/9600").parse() {
+                        let _ = discovery_commands.send(Command::Dial(address)).await;
+                    }
+                }
+                return;
+            }
             let mut lookups = FuturesUnordered::new();
             for host in NetworkConfig::mainnet().dns_seeds {
                 lookups.push(async move {
@@ -211,6 +267,7 @@ impl Network {
             > = HashMap::new();
             loop {
                 tokio::select! {
+                    _=async {match &stop {Some(t)=>t.cancelled().await,None=>std::future::pending::<()>().await}}=>break,
                     command = receive.recv() => match command {
                         Some(Command::Dial(address)) => { let _ = swarm.dial(address); }
                         Some(Command::Headers(peer, request, reply)) => {
@@ -319,7 +376,11 @@ impl Network {
                 }
             }
         });
-        Ok(Self { commands, peers })
+        Ok(Self {
+            commands,
+            peers,
+            lifecycle,
+        })
     }
 
     async fn headers(&self, peer: PeerId, first: u64, count: u16) -> Result<GetHeadersResponse> {
@@ -421,6 +482,7 @@ async fn discover(
     network: &mut Network,
 ) -> Result<Vec<(PeerId, noid_p2p::object_protocol::ChainPoint)>> {
     let start = Instant::now();
+    let starting = network.peers.borrow().is_empty();
     loop {
         let waiting = { network.peers.borrow().is_empty() };
         if !waiting {
@@ -429,7 +491,9 @@ async fn discover(
         tokio::time::timeout(Duration::from_secs(20), network.peers.changed()).await??;
     }
     // Let independent startup dials finish before selecting a source.
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    if starting {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
     let peers = network.peers.borrow().clone();
     let mut queries = FuturesUnordered::new();
     for peer in peers {
@@ -626,7 +690,7 @@ async fn fetch_bundle(
         origin.len(),
     );
     let mut header_file = File::open(temporary.path().join("headers.bin"))?;
-    let header = paramo1d::headers::read_header(&mut header_file, boundary.height)?;
+    let header = crate::headers::read_header(&mut header_file, boundary.height)?;
     ensure!(
         block_id(&header) == boundary.hash
             && semantic_header_id(&header) == metadata.terminal_hash(),
@@ -653,6 +717,36 @@ async fn fetch_bundle(
     Ok(())
 }
 
+pub(crate) fn observed_height(artifact_directory: &Path) -> Result<u64> {
+    let legacy=artifacts::pinned(artifact_directory,"legacy")?;
+    let bank=legacy[legacy.len()-32..].try_into()?;
+    with_connection(bank,NetworkProfile::for_proof_bank(bank),|executor,mut network| {
+        executor.block_on(crate::mobile_control::cancellable(async move {
+            while network.peers.borrow().is_empty() {
+                tokio::time::timeout(Duration::from_secs(10),network.peers.changed()).await??;
+            }
+            let peers=network.peers.borrow().clone();
+            let mut replies=FuturesUnordered::new();
+            for peer in peers.into_iter().take(2) {
+                let network=network.clone();
+                replies.push(async move {(peer,network.headers(peer,0,1).await)});
+            }
+            while let Some((peer,reply))=tokio::time::timeout(Duration::from_secs(3),replies.next()).await? {
+                if let Ok(reply)=reply {
+                    if reply.records.first().is_some_and(|r|r.header==noid_chain::consensus::genesis::genesis_header()) {
+                        if let Some(point)=reply.snapshot_boundary.filter(|p|p.height<MAX_HEIGHT) {
+                            let tail=tokio::time::timeout(Duration::from_secs(3),network.headers_with_inventory(peer,point.height+1,64,false)).await;
+                            let observed=tail.ok().and_then(Result::ok).and_then(|r|r.records.into_iter().filter(|r|r.header.height>point.height && r.header.height<=point.height+64 && r.header.height<MAX_HEIGHT).map(|r|r.header.height).max());
+                            return Ok(observed.unwrap_or(point.height));
+                        }
+                    }
+                }
+            }
+            anyhow::bail!("Mainnet peer is unavailable")
+        }))
+    })
+}
+
 pub fn run(
     artifact_directory: PathBuf,
     data_directory: PathBuf,
@@ -671,21 +765,49 @@ pub fn run(
     );
     eprintln!("  RUNTIME    Loading released verification parameters");
     let legacy = artifacts::read_bounded(&artifact_directory.join("legacy"), 4 * 1024 * 1024)?;
-    let profile = NetworkProfile::for_proof_bank(legacy[legacy.len() - 32..].try_into()?);
-    let mut verifier = Verifier::open(&artifact_directory, MatrixMode::Streaming)?;
+    let bank = legacy[legacy.len() - 32..].try_into()?;
+    let profile = NetworkProfile::for_proof_bank(bank);
     eprintln!("  NETWORK    Discovering mainnet peers over device internet");
-    let executor = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    executor.block_on(async move {
-        let mut network = Network::start(profile).await?;
-        let mut round = 0u64;
+    with_connection(bank, profile, |executor, mut network| {
+        crate::verifier_session::with(&artifact_directory, |verifier| {
+            executor.block_on(crate::mobile_control::cancellable(async move {
+        let mut round = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64;
         let mut previous: Option<PathBuf> = None;
         let mut accepted_height = None;
+        let mut resumed = None;
+        if let Ok(bytes) = artifacts::read_bounded(&data_directory.join("accepted.json"), 1024 * 1024) {
+            if let Ok(saved) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if let Some(name) = saved["bundle"].as_str().filter(|name| name.starts_with("candidate-") && name.len()<128 && !name.contains('/') && !name.contains('\\')) {
+                    let directory=data_directory.join(name);
+                    // Check the stored header work first. A newer recursive
+                    // proof authenticates the resulting State and history.
+                    if let Ok((height,state))=verifier.prepare_resume(&directory) {
+                        accepted_height=Some(height);
+                        resumed=state.map(|state|serde_json::json!({"transport":"direct-p2p","bundle":name,"verified":state,"reused_boundary":true}));
+                        previous=Some(directory);
+                    }
+                }
+            }
+        }
         let mut initial_sync_ms = None;
         loop {
             let candidates = discover(&mut network).await?;
             if accepted_height.is_some_and(|height| candidates.iter().all(|(_, point)| point.height <= height)) {
+                // Returning the saved State itself requires its full proof.
+                if resumed.is_none() {
+                    if let Some(directory) = previous.as_ref() {
+                        match verifier.verify_bundle(directory) {
+                            Ok(state) => resumed=Some(serde_json::json!({"transport":"direct-p2p","bundle":directory.file_name().and_then(|v|v.to_str()),"verified":state,"reused_boundary":true})),
+                            Err(error) => {
+                                verifier.discard_resume_headers();
+                                previous=None; accepted_height=None;
+                                eprintln!("  RECOVER    Stored proof: {error:#}");
+                                continue;
+                            }
+                        }
+                    }
+                }
+                if once { return resumed.context("accepted boundary unavailable"); }
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             }
@@ -695,6 +817,7 @@ pub fn run(
                 round += 1;
                 let output = data_directory.join(format!("candidate-{round}-{}", boundary.height));
                 if accepted_height.is_some_and(|height| boundary.height <= height) { continue; }
+                crate::mobile_control::verifying();
                 match fetch_bundle(&network, peer, boundary, &output, &verifier, previous.as_deref()).await {
                     Ok(()) => {
                         eprintln!("  VERIFY     Header work, fork certificate and recursive State proof");
@@ -707,6 +830,16 @@ pub fn run(
                     Err(error) => eprintln!("  RETRY      Peer transfer: {error:#}"),
                 }
             }
+            // A damaged saved bundle must not pin an unusable header hint.
+            // Authenticate the old proof before retaining its floor after a
+            // failed update. Only the provisional cold-start hint is cleared.
+            if accepted.is_none() && verifier.discard_resume_headers() {
+                let old_is_valid = previous.as_ref().is_some_and(|directory|verifier.verify_bundle(directory).is_ok());
+                if !old_is_valid {
+                    previous=None; accepted_height=None; resumed=None;
+                    continue;
+                }
+            }
             let (state, directory) = accepted.context("no mainnet candidate passed verification")?;
             eprintln!("\n\x1b[1;32m  SYNCED     MAINNET · BLOCK {}\x1b[0m", state.height());
             eprintln!("  STATE      {}", state.state_root());
@@ -715,12 +848,20 @@ pub fn run(
             let startup_ms = *initial_sync_ms.get_or_insert_with(|| started.elapsed().as_millis());
             let peak = peak_memory_kib();
             if let Some(kib) = peak { eprintln!("  RAM        {:.1} MiB peak", kib as f64/1024.0); }
-            let result = serde_json::json!({"transport":"direct-p2p","startup_ms":startup_ms,"update_ms":update_started.elapsed().as_millis(),"peak_rss_kib":peak,"verified":state});
-            fs::write(data_directory.join("accepted.json"), serde_json::to_vec_pretty(&result)?)?;
-            if once { return Ok(result); }
+            let result = serde_json::json!({"transport":"direct-p2p","bundle":directory.file_name().and_then(|v|v.to_str()),"startup_ms":startup_ms,"update_ms":update_started.elapsed().as_millis(),"peak_rss_kib":peak,"verified":state});
+            let mut record=tempfile::NamedTempFile::new_in(&data_directory)?;
+            record.write_all(&serde_json::to_vec_pretty(&result)?)?;
+            record.as_file().sync_all()?;
+            record.persist(data_directory.join("accepted.json")).map_err(|e|e.error)?;
+            if once {
+                if let Some(old)=previous.filter(|old|old!=&directory) { fs::remove_dir_all(old)?; }
+                return Ok(result);
+            }
             accepted_height = Some(state.height());
             if let Some(old) = previous.replace(directory) { fs::remove_dir_all(old)?; }
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
+    }))
+        })
     })
 }

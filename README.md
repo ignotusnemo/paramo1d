@@ -1,115 +1,82 @@
 # Paramo1d
 
-A native Rust client for verifying Parano1d on mobile devices. It connects directly to mainnet peers, checks the header chain from genesis and verifies the current recursive State proof and fork certificates.
+An Android messenger with a Parano1d node, encrypted direct conversations and native NOID payments. The phone verifies blockchain State and payment receipts. Nearby participants can exchange messages and carry approved payments over Bluetooth.
 
-Verification uses all available CPU cores automatically. Compressed matrices stay on disk and are processed in bounded buffers. The terminal shows download progress, verified heights, synchronization time and peak memory use.
+## Install
 
-## Benchmarks
+Download the ARM64 APK from [Releases](https://github.com/ignotusnemo/paramo1d/releases/latest). Android 8.0 or later and ARM64 hardware with AES and PMULL are required. The APK includes the mainnet verification parameters.
 
-**Full mainnet synchronization from scratch: 48.43 seconds on an entry-level Redmi 15C smartphone.**
+Release downloads include APK hashes and the public signing-certificate fingerprint. Updates use the same release signing key.
 
-Measured on a **Redmi 15C with 4 GB RAM**, Android 15, ARM64 and **8 CPU cores**, using its own **4G connection through a VPN**. The client ran natively in Termux with a release build and mainnet Small proofs.
+## Chat and payments
 
-The measurement started with an empty chain-data directory. Verification parameters and prepared matrix caches were installed beforehand.
+- One public community chat and encrypted direct conversations.
+- Native NOID payment requests, local authorization and checked inclusion receipts.
+- Bluetooth delivery for messages, authorized payments and receipts.
+- Configurable internet relays and an app-only protected AmneziaWG connection with HTTPS fallback.
+- Background messages, fingerprint or screen-lock entry and encrypted portable backups.
 
-| Measurement | Result |
-| --- | ---: |
-| Mainnet sync from scratch | **48.43 s** |
-| Accepted mainnet block | 249884 |
-| Headers checked from genesis | 249,885 |
-| Header-chain verification | 7.44 s |
-| Current State proof verification | **10.78 s** |
-| Peak process memory | **192.2 MiB** |
+A participant can forward an already-approved payment using its existing authorization. The phone verifies received evidence against its own accepted chain.
 
-Full synchronization time includes runtime loading, peer discovery, downloads and verification from genesis to the accepted mainnet block.
+Direct messages use X25519 and XSalsa20-Poly1305. NOID authorization uses the production Owner proof protocol. The community chat and blockchain payments are public.
 
-Once synchronized, downloading and verifying a new block took **11.94–13.20 s**. The running client reused its checked header prefix and authenticated certificates, with fresh verification of each new State proof. Peak process memory reached **193.2 MiB** during these updates.
+## Verification on the phone
 
-## Build
+The node checks the header chain from genesis, proof of work, fork certificates and the recursive State proof. Wallet inputs and payment receipts are authenticated against accepted headers and State roots.
 
-Requires Rust 1.96 and Clang with libclang. The Rust version is set in `rust-toolchain.toml`.
+While the app is open and unlocked, small queries watch for changes to the wallet's coins. Changed coins trigger State and membership verification. The node stops when the app is minimized or locked. Background message delivery continues independently.
+
+On a Redmi 15C with 4 GB RAM, new Small and Native proofs took 5.042 and 5.635 seconds with authenticated parameters retained in memory. The first complete bundle check took 49.877 seconds after opening the parameter runtime. The [device report](android/reports/redmi-15c-2026-11-10.md) records the conditions, cold-start costs, mainnet payment and actual Bluetooth checks.
+
+[Android usage and build instructions](android/README.md) · [Command-line verifier measurements](docs/verifier-benchmarks.md)
+
+## Build Android
+
+The build uses Rust 1.96, the Android NDK, Java 21, Gradle 8.14.3 and Go 1.27.3. Exact build inputs and their hashes are pinned in [android/build-inputs.json](android/build-inputs.json).
+
+```sh
+python3 scripts/fetch-android-artifacts.py --output ./artifacts
+python3 scripts/build-courier.py \
+  --ndk /path/to/android-ndk \
+  --sdk /path/to/android-sdk \
+  --java-home /path/to/jdk \
+  --gradle /path/to/gradle/bin/gradle \
+  --artifacts ./artifacts \
+  --go /path/to/go/bin/go
+```
+
+The development APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`. Release builds use `--variant release` and the signing environment described in the Android documentation.
+
+The [Android workflow](.github/workflows/android.yml) runs the tests and builds an APK. A version tag builds a signed release and publishes it after the checks pass.
+
+## Command-line client
 
 ```sh
 cargo build --locked --release
-cargo test --locked
-python3 scripts/check-upstream.py
+paramo1d run --artifacts ./artifacts --data-dir ./mainnet
 ```
 
-For Android ARM64, install the Rust target and build with the Android NDK:
+The client discovers mainnet peers through DNS seeds. `--once` performs one synchronization pass. `mainnet/accepted.json` records the accepted height, block hash, State root and measurements.
 
-```sh
-rustup target add aarch64-linux-android
-python3 scripts/build-android.py --ndk /path/to/android-ndk --cli
-```
-
-The Android outputs are `target/aarch64-linux-android/release/paramo1d` and `libparamo1d.so`. Minimum Android API: 26. The verification backend requires NEON and PMULL on ARM64, or SSE4.1 and PCLMULQDQ on x86-64.
-
-## Verification parameters
-
-Prepare the parameters from the release inputs matching [`profiles/mainnet.json`](profiles/mainnet.json). The input directory contains `history-step-pack-v1`, `history-step-pack-v2` and `history-step-pack-v21`.
-
-```sh
-target/release/paramo1d prepare \
-  --source /path/to/release-inputs \
-  --artifacts ./artifacts
-```
-
-Preparation checks the release metadata and matrix identities, then writes compressed matrices and authenticated row-span caches. The client checks these caches against compiled SHA-256 pins and computes fresh matrix claims for each proof. Install the resulting `artifacts` directory alongside the client.
-
-## Run
-
-```sh
-PARAMO1D_TERMINAL=1 ./paramo1d run \
-  --artifacts ./artifacts \
-  --data-dir ./mainnet
-```
-
-The client discovers peers through the mainnet DNS seeds and downloads chain data directly over P2P. It checks header linkage, difficulty, timestamps, State expansion and proof of work, then authenticates the fork certificates and recursive State proof.
-
-After synchronization, it follows new blocks. Updates preserve accepted chainwork and the accepted finality boundary. `mainnet/accepted.json` records the verified height, block hash, State root, timings and peak memory.
-
-Add `--once` for a single synchronization pass. Use `--threads N` before the subcommand to select a smaller CPU budget. Run `./paramo1d --help` for all commands.
-
-## Offline verification
-
-Export a public proof bundle from an ordinary node's database in read-only mode:
+For offline verification, export a public proof bundle from a node database opened in read-only mode:
 
 ```sh
 paramo1d export --node-data /path/to/node --output ./bundle
 paramo1d verify --artifacts ./artifacts --bundle ./bundle
 ```
 
-`export --height H` selects an available earlier block. The bundle contains headers, the recursive proof and public fork certificates.
+`Verifier` retains authenticated runtime material across checks. The [C interface](include/paramo1d.h) provides one-shot verification and reusable sessions. Streaming matrices and bounded caches support mobile memory budgets. Verification uses the available CPU cores automatically.
 
-The `fetch` command collects a bundle through an ordinary node's RPC:
+## Checks and source
 
 ```sh
-paramo1d fetch \
-  --rpc http://127.0.0.1:9601 \
-  --origins /path/to/node/fork-origins \
-  --output ./bundle
+cargo test --locked --release --workspace
+python3 scripts/check-upstream.py
+cd tunnel && go test ./...
 ```
 
-`verify --repeat 2` measures repeated verification in one process. Streaming is the default matrix mode. `--matrix-mode resident` selects the packed-row implementation.
+Run the browser checks with `npm ci && npm test` from `android/tests`. The [Android storage fixture](android/storage-check/README.md) exercises encrypted storage and portable recovery under its own test identity.
 
-## Library
+The [source inventory](vendor/upstream.json) and [mobile adapters](vendor/client-overrides.json) bind the vendored verification code. [profiles/mainnet.json](profiles/mainnet.json) pins the production parameters. The source checker validates both inventories.
 
-Rust callers use `Verifier` to retain authenticated runtime data across updates. Successful verification returns a `VerifiedState` with the accepted height, block hash and State root.
-
-The [C interface](include/paramo1d.h) provides one-shot verification and reusable sessions. Call verification on a worker thread. Session configuration contains `artifacts`, with an optional `threads` field:
-
-```json
-{"artifacts":"/private/app/artifacts"}
-```
-
-Create a session with `paramo1d_session_new_json`, then pass `{"bundle":"/private/app/bundle"}` to `paramo1d_session_verify_json`. Calls are serialized. Release returned JSON with `paramo1d_free_json` and close the session with `paramo1d_session_free` after pending calls finish.
-
-Matrix caches bind canonical rows to the released matrix identity through compiled SHA-256 pins. Their use relies on SHA-256 second-preimage resistance and process-private cache memory. Each proof receives fresh extension-field evaluation.
-
-## Source and license
-
-The verifier uses Parano1d source pinned at `848209d5db75137483cb41a94b310ad11463473f`. [`vendor/upstream.json`](vendor/upstream.json) records the source hashes. [`vendor/client-overrides.json`](vendor/client-overrides.json) records the mobile adapters. `scripts/check-upstream.py` checks both inventories and the vendored MDBX binding.
-
-The `isolated-testnet` build feature selects the local test profile in [`profiles/isolated.json`](profiles/isolated.json).
-
-Licensed under [Apache-2.0](LICENSE).
+Licensed under [Apache-2.0](LICENSE). Third-party license texts are included with the relevant components and Android assets.

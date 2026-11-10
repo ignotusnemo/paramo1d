@@ -2,8 +2,8 @@
   "purpose": "Bounded-memory access to unchanged authenticated matrix claims",
   "files": {
     "Cargo.toml": "0ee6bdf52d0880c528564d57ba895eeb3199257a03b9ad9c933904b9eaebda4f",
-    "noid_ivc_core/src/field_r1cs.rs": "5af449450f7b8948fc86ad34f0b9f80c90a1b2f93ecea85991ab687bea6d33ae",
-    "noid_ivc_core/src/matrix_claim/c1.rs": "f58168a16f84d7a6ccbad65d19bc1285a59359ed5d4b4ee7b7f52d2e3c2fe410",
+    "noid_ivc_core/src/field_r1cs.rs": "e2734b98219442b134d630d364e874df114d75107d4cb878d7701997d8af75fb",
+    "noid_ivc_core/src/matrix_claim/c1.rs": "f9729ea3ba71d4a837bc1712182b880967b369ed717c92b97b29af47daeb4414",
     "noid_recursive/src/acceptance/history_step/v2/capacity_banked.rs": "bff619847c8bef78ba731b7b54068f8364378fb083e150c44ab32038a404a257",
     "noid_recursive/src/acceptance/history_step/v2/banked.rs": "2057abfd5eb33430eb831575aeb19911651b427b8e1c2e5642c0d7875a819bc5",
     "noid_recursive/src/acceptance/history_step/v2/capacity_banked/decision.rs": "5fea0610e7e408fdbe7fb803ea16103032edf98d1beb9eb66091901e5c960994",

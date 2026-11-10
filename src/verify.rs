@@ -12,7 +12,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{path::Path, time::Instant};
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct VerifiedState {
     network: String,
     height: u64,
@@ -30,6 +30,7 @@ pub struct VerifiedState {
     origin_ms: u128,
     proof_ms: u128,
     reused_headers: u64,
+    reused_verification: bool,
 }
 
 pub struct Verifier {
@@ -39,6 +40,7 @@ pub struct Verifier {
     current: Option<CachedOrigin<v21::VerifiedOrigin>>,
     current_predecessor: Option<[u8; 32]>,
     headers: Option<CheckedHeaders>,
+    resume_headers_only: bool,
 }
 
 struct CachedOrigin<T> {
@@ -98,7 +100,7 @@ impl Verifier {
     }
 
     pub fn open(artifact_directory: &Path, mode: MatrixMode) -> Result<Self> {
-        noid_core::cpu::ensure_production_hardware()?;
+        crate::ensure_verification_hardware()?;
         Ok(Self {
             runtime: Runtime::load(artifact_directory, mode)?,
             mode,
@@ -106,9 +108,48 @@ impl Verifier {
             current: None,
             current_predecessor: None,
             headers: None,
+            resume_headers_only: false,
         })
     }
 
+    pub(crate) fn prepare_resume_headers(
+        &mut self,
+        bundle: &Path,
+    ) -> Result<Option<HeaderSummary>> {
+        if self.resume_headers_only {
+            return Ok(self.headers.as_ref().map(CheckedHeaders::summary));
+        }
+        if self.headers.is_some() {
+            return Ok(None);
+        }
+        let headers = CheckedHeaders::verify(&bundle.join("headers.bin"))?;
+        let summary = headers.summary();
+        self.headers = Some(headers);
+        self.resume_headers_only = true;
+        Ok(Some(summary))
+    }
+    pub(crate) fn discard_resume_headers(&mut self) -> bool {
+        if !self.resume_headers_only {
+            return false;
+        }
+        self.headers = None;
+        self.resume_headers_only = false;
+        true
+    }
+    pub(crate) fn cached_state_is_current(&self, state: &VerifiedState) -> bool {
+        !self.resume_headers_only
+            && self.headers.as_ref().is_some_and(|headers| {
+                headers.tip.height == state.height
+                    && hex::encode(noid_chain::block_header::block_id(&headers.tip))
+                        == state.block_hash
+            })
+    }
+    pub(crate) fn checked_header(&self, height: u64) -> Result<noid_chain::BlockHeader> {
+        self.headers
+            .as_ref()
+            .context("Verify the chain before reading its headers")?
+            .at(height)
+    }
     pub fn verify_bundle(&mut self, bundle: &Path) -> Result<VerifiedState> {
         let start = Instant::now();
         let headers =
@@ -277,13 +318,28 @@ impl Verifier {
             origin_ms,
             proof_ms: proof_started.elapsed().as_millis(),
             reused_headers: headers.reused,
+            reused_verification: false,
         };
         self.headers = Some(headers);
+        self.resume_headers_only = false;
         Ok(result)
     }
 }
 
 impl VerifiedState {
+    pub(crate) fn reused(mut self, elapsed: u128) -> Self {
+        self.elapsed_ms = elapsed;
+        self.proof_ms = 0;
+        self.header_ms = 0;
+        self.origin_ms = 0;
+        self.reused_headers = self.height + 1;
+        self.reused_verification = true;
+        self
+    }
+    pub fn reused_verification(&self) -> bool {
+        self.reused_verification
+    }
+
     pub fn height(&self) -> u64 {
         self.height
     }

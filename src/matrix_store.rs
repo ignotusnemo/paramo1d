@@ -181,6 +181,7 @@ impl Read for ChunkedMatrix {
     fn read(&mut self, destination: &mut [u8]) -> io::Result<usize> {
         let mut written = 0;
         while written < destination.len() && self.position < self.length {
+            crate::mobile_control::check_io()?;
             let index = (self.position / CHUNK_BYTES as u64) as usize;
             let offset = (self.position % CHUNK_BYTES as u64) as usize;
             let bytes = self.load(index)?;
@@ -217,6 +218,12 @@ pub enum MatrixReader {
 }
 
 impl MatrixReader {
+    pub fn decoded_len(&self) -> io::Result<u64> {
+        match self {
+            Self::Plain(file) => Ok(file.metadata()?.len()),
+            Self::Chunked(file) => Ok(file.length),
+        }
+    }
     pub fn open(path: &Path, cap: u64) -> Result<Self> {
         let compact = path.with_extension("pmatrix");
         if compact.exists() {
@@ -233,6 +240,7 @@ impl MatrixReader {
 
 impl Read for MatrixReader {
     fn read(&mut self, destination: &mut [u8]) -> io::Result<usize> {
+        crate::mobile_control::check_io()?;
         match self {
             Self::Plain(file) => file.read(destination),
             Self::Chunked(file) => file.read(destination),
@@ -242,6 +250,7 @@ impl Read for MatrixReader {
 
 impl Seek for MatrixReader {
     fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        crate::mobile_control::check_io()?;
         match self {
             Self::Plain(file) => file.seek(position),
             Self::Chunked(file) => file.seek(position),

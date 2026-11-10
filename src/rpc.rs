@@ -22,6 +22,12 @@ pub struct Rpc {
 
 impl Rpc {
     pub fn new(endpoint: &str) -> Result<Self> {
+        Self::with_timeout(endpoint, Duration::from_secs(30))
+    }
+    pub(crate) fn watch(endpoint: &str) -> Result<Self> {
+        Self::with_timeout(endpoint, Duration::from_secs(5))
+    }
+    fn with_timeout(endpoint: &str, timeout: Duration) -> Result<Self> {
         let endpoint = Url::parse(endpoint)?;
         let loopback = endpoint.host_str().is_some_and(|host| {
             host == "localhost"
@@ -40,12 +46,14 @@ impl Rpc {
             "use HTTPS or loopback HTTP"
         );
         ensure!(endpoint.fragment().is_none(), "RPC URL fragment");
-        let client = Client::builder()
-            .redirect(Policy::none())
-            .no_proxy()
-            .timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(10))
-            .build()?;
+        let client = crate::network_route::client(
+            Client::builder()
+                .redirect(Policy::none())
+                .no_proxy()
+                .timeout(timeout)
+                .connect_timeout(timeout.min(Duration::from_secs(10))),
+        )?
+        .build()?;
         Ok(Self {
             endpoint,
             client,
@@ -54,6 +62,7 @@ impl Rpc {
     }
 
     fn post(&self, body: &Value) -> Result<Value> {
+        crate::mobile_control::check()?;
         let response = self
             .client
             .post(self.endpoint.clone())

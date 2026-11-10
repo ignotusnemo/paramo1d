@@ -1,0 +1,34 @@
+plugins { id 'com.android.application' version '8.10.1' }
+
+android {
+    namespace 'org.parano1d.courier'
+    compileSdk 36
+    buildToolsVersion '36.0.0'
+    defaultConfig {
+        applicationId 'org.parano1d.courier.storagecheck'
+        minSdk 26
+        targetSdk 35
+        ndk { abiFilters 'arm64-v8a' }
+    }
+    sourceSets {
+        main {
+            java {
+                srcDirs 'src/main/java', "$buildDir/generated/storageSources"
+            }
+            jniLibs.srcDirs '../app/src/main/jniLibs'
+        }
+    }
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+            excludes += ['**/libparamo1d_tunnel.so']
+        }
+    }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+}
+
+tasks.register('copyStorageSources', Copy) {
+    from('../app/src/main/java/org/parano1d/courier') { include 'SecureStore.java', 'NativeCore.java' }
+    into(layout.buildDirectory.dir('generated/storageSources/org/parano1d/courier'))
+}
+tasks.named('preBuild').configure { dependsOn 'copyStorageSources' }

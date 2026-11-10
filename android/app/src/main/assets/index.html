@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#00ff80">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <title>Paramo1d</title>
+  <link rel="stylesheet" href="app.css">
+  <script src="qrcode.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div id="app">
+    <header class="masthead">
+      <button class="brand" id="home-button" aria-label="Paramo1d home"><img class="brand-logo" src="brand.svg" alt=""><span>paramo1d<span class="brand-period">.</span></span></button>
+      <div class="mast-actions"><button id="connection" class="connection" aria-label="Connection options"><span class="connection-action">Connections <svg class="icon" aria-hidden="true"><use href="icons.svg#outgoing"/></svg></span><span class="connection-state"><i></i><span id="connection-status">Offline</span></span></button><button id="settings-button" class="icon-button" aria-label="Settings"><svg class="icon" aria-hidden="true"><use href="icons.svg#settings"></use></svg></button></div>
+    </header>
+
+    <main class="workspace">
+      <aside class="sidebar" id="sidebar">
+        <div class="identity-strip"><button id="identity-button" class="identity-button"><span id="my-avatar" class="avatar">P</span><span><strong id="my-name">Your identity</strong><small id="my-fingerprint">Stored on this device</small></span></button><button class="icon-button" id="invite-button" aria-label="Share your contact"><svg class="icon" aria-hidden="true"><use href="icons.svg#share"></use></svg></button></div>
+        <nav class="desktop-tabs" aria-label="Main navigation"><button data-tab="groups" class="active">Community</button><button data-tab="direct">Messages</button><button data-tab="wallet">Wallet</button></nav>
+        <section class="list-section" id="list-section">
+          <div class="section-heading"><h1 id="list-heading">Community</h1><button id="new-button" class="outline-button" aria-label="Add a contact">Add contact</button></div>
+          <label class="search-field"><span><svg class="icon" aria-hidden="true"><use href="icons.svg#search"></use></svg></span><input id="search" type="search" placeholder="Find a conversation" autocomplete="off" aria-label="Find a conversation"></label>
+          <div id="conversation-list" class="conversation-list"></div>
+          <div class="list-footnote" id="list-footnote">One community. Direct connections.</div>
+        </section>
+      </aside>
+
+      <section class="content" id="content">
+        <section id="welcome-panel" class="welcome-panel">
+          <span class="eyebrow">DIRECT MESSAGES</span><h2>Open a<br><span>conversation.</span></h2>
+          <p>Add a contact or meet someone in the community chat.</p>
+          <button class="primary-button" id="welcome-group">Open #parano1d <span><svg class="icon" aria-hidden="true"><use href="icons.svg#outgoing"></use></svg></span></button>
+        </section>
+
+        <section id="chat-panel" class="chat-panel" hidden>
+          <header class="chat-header"><button class="icon-button back-button" id="back-button" aria-label="Back"><svg class="icon" aria-hidden="true"><use href="icons.svg#back"></use></svg></button><span class="avatar room-avatar" id="chat-avatar">#</span><button class="chat-title" id="chat-profile"><strong id="chat-name"></strong><span id="chat-description"></span></button><button id="payment-button" class="outline-button" hidden>Send NOID <svg class="icon" aria-hidden="true"><use href="icons.svg#outgoing"></use></svg></button></header>
+          <div class="chat-context" id="chat-context"></div>
+          <div class="message-scroll" id="message-scroll"><div id="messages" class="messages" aria-live="polite"></div></div>
+          <div class="compose-wrapper"><form id="compose-form" class="composer"><button type="button" id="attachment-button" class="icon-button" aria-label="Conversation actions"><svg class="icon" aria-hidden="true"><use href="icons.svg#plus"></use></svg></button><textarea id="compose" rows="1" maxlength="4096" placeholder="Write a message…" aria-label="Message"></textarea><button type="submit" class="send-button" aria-label="Send message"><svg class="icon" aria-hidden="true"><use href="icons.svg#send"></use></svg></button></form><span class="compose-note" id="compose-note"></span></div>
+        </section>
+
+        <section id="wallet-panel" class="wallet-panel" hidden>
+          <div class="page-heading"><span class="eyebrow">NATIVE NOID</span><h1>Wallet<span class="green">.</span></h1><span id="node-status" class="status-label">UPDATE WHEN YOU NEED</span></div>
+          <div class="balance-block"><span class="eyebrow">BALANCE</span><div><strong id="balance">—</strong><span>NOID</span></div><p id="balance-description">Open your wallet online before making your first payment.</p><button id="sync-button" class="primary-button">Update balance <span><svg class="icon" aria-hidden="true"><use href="icons.svg#refresh"></use></svg></span></button></div>
+          <div class="wallet-actions"><button id="receive-button"><span><svg class="icon" aria-hidden="true"><use href="icons.svg#receive"></use></svg></span><strong>Receive</strong></button><button id="send-button"><span><svg class="icon" aria-hidden="true"><use href="icons.svg#outgoing"></use></svg></span><strong>Send</strong></button></div>
+          <div id="wallet-setup"></div><div id="pending-payments" class="pending-payments"></div>
+          <div class="address-block"><span class="eyebrow">RECEIVING ADDRESS</span><button id="wallet-address" class="address-copy" aria-label="Copy wallet address"></button></div>
+          <div class="section-heading"><h2>Receipts</h2><button id="import-receipt-button" class="outline-button" hidden>Import receipt</button></div><div id="receipts" class="receipts"></div>
+          <div class="wallet-note"><span><svg class="icon" aria-hidden="true"><use href="icons.svg#clock"></use></svg></span><p>You can keep chatting while your wallet updates. Your phone checks payments itself.</p></div>
+        </section>
+      </section>
+    </main>
+    <nav class="mobile-tabs" aria-label="Main navigation"><button data-tab="groups" class="active"><span><svg class="icon" aria-hidden="true"><use href="icons.svg#chat"></use></svg></span>Community</button><button data-tab="direct"><span><svg class="icon" aria-hidden="true"><use href="icons.svg#direct"></use></svg></span>Messages</button><button data-tab="wallet"><span><svg class="icon" aria-hidden="true"><use href="icons.svg#wallet"></use></svg></span>Wallet</button></nav>
+  </div>
+
+  <div id="onboarding" class="onboarding" hidden><div class="onboarding-inner"><img class="brand-logo large-mark" src="brand.svg" alt="Parano1d"><span class="eyebrow">WELCOME TO PARAMO1D</span><h1>Chat. Pay.<br><span>Stay connected.</span></h1><p>One community chat, private messages<br>and your NOID wallet. No phone number needed.</p><form id="create-identity-form"><label>Your display name<input id="display-name" maxlength="40" placeholder="What should people call you?" required autocomplete="nickname"></label><button class="primary-button" type="submit">Create my profile <span><svg class="icon" aria-hidden="true"><use href="icons.svg#outgoing"></use></svg></span></button></form><button id="restore-button" class="text-button">Restore from a backup</button><small>Your profile and wallet are created on this phone.<br>Save a backup in Settings to keep access.</small></div></div>
+  <dialog id="modal"><div class="modal-heading"><span id="modal-eyebrow" class="eyebrow">PARAMO1D</span><button id="close-modal" class="icon-button" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="icons.svg#close"></use></svg></button></div><h2 id="modal-title"></h2><div id="modal-content"></div></dialog>
+  <div id="toast" role="status" hidden></div>
+</body>
+</html>

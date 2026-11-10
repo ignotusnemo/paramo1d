@@ -2,7 +2,6 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use paramo1d::{artifacts, MatrixMode};
 use std::path::PathBuf;
-mod mobile;
 
 #[derive(Parser)]
 #[command(
@@ -71,6 +70,7 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+    paramo1d::ensure_verification_hardware()?;
     let args = Arguments::parse();
     let workers = paramo1d::resolve_workers(args.threads)?;
     rayon::ThreadPoolBuilder::new()
@@ -87,7 +87,7 @@ fn main() -> Result<()> {
             artifacts,
             data_dir,
             once,
-        } => mobile::run(artifacts, data_dir, once)?,
+        } => paramo1d::mobile::run(artifacts, data_dir, once)?,
         Command::Prepare { source, artifacts } => artifacts::prepare(&source, &artifacts)?,
         Command::PrepareCaches {
             artifacts,

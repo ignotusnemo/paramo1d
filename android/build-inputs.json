@@ -1,0 +1,14 @@
+{
+  "parameters": {
+    "url": "https://github.com/ignotusnemo/paramo1d/releases/download/android-parameters-v2.1/paramo1d-mainnet-parameters-v2.1.tar.gz",
+    "sha256": "87389c6958d8c8be8fe7db73775884ed9c60fe5ef49bf0806719d957d1711ba7",
+    "bytes": 93564453
+  },
+  "ndk": "30.0.16248370",
+  "gradle": {
+    "version": "8.14.3",
+    "url": "https://services.gradle.org/distributions/gradle-8.14.3-bin.zip",
+    "sha256": "bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531"
+  },
+  "java": "21"
+}

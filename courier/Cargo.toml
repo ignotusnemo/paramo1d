@@ -1,0 +1,21 @@
+[package]
+name = "paramo1d-courier"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Paramo1d message envelopes, contacts and encrypted delivery"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hkdf = "0.12"
+hex = "0.4"
+base64 = "0.22"
+rand = "0.8"
+crypto_box = "0.9.1"
+ed25519-dalek = "2.2"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+argon2 = "0.5"
+chacha20poly1305 = "0.10"

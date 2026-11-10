@@ -1,0 +1,145 @@
+name: Android
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: tunnel/go.mod
+          cache-dependency-path: tunnel/go.sum
+      - name: Install Rust
+        run: rustup toolchain install 1.96.0 --profile minimal
+      - name: Check pinned source
+        run: python3 scripts/check-upstream.py
+      - name: Test native verification and message delivery
+        run: cargo test --locked --release --workspace
+      - name: Test protected transport
+        working-directory: tunnel
+        run: go test ./...
+      - name: Test fragmented Bluetooth frames
+        run: |
+          mkdir -p target/nearby-wire-check
+          javac -d target/nearby-wire-check android/app/src/main/java/org/parano1d/courier/NearbyWire.java android/tests/NearbyWireTest.java
+          java -cp target/nearby-wire-check org.parano1d.courier.NearbyWireTest
+      - name: Test application interface
+        working-directory: android/tests
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+          CHROME="$(node -p "require('playwright').chromium.executablePath()")" npm test
+
+  apk:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: tunnel/go.mod
+          cache-dependency-path: tunnel/go.sum
+      - name: Install Rust and Android tools
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --target aarch64-linux-android
+          sudo apt-get update -qq
+          sudo apt-get install -y libclang-dev
+          NDK_VERSION=$(python3 -c 'import json; print(json.load(open("android/build-inputs.json"))["ndk"])')
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" "ndk;$NDK_VERSION"
+      - name: Install pinned Gradle
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, urllib.request, zipfile
+          pin = json.load(open('android/build-inputs.json'))['gradle']
+          destination = pathlib.Path(os.environ['RUNNER_TEMP'])
+          archive = destination / 'gradle.zip'
+          urllib.request.urlretrieve(pin['url'], archive)
+          assert hashlib.sha256(archive.read_bytes()).hexdigest() == pin['sha256']
+          with zipfile.ZipFile(archive) as files:
+              files.extractall(destination)
+          script = destination / ('gradle-' + pin['version']) / 'bin/gradle'
+          script.chmod(0o755)
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write('PARAMO1D_GRADLE=' + str(script) + '\n')
+          PY
+      - name: Fetch authenticated verification parameters
+        run: python3 scripts/fetch-android-artifacts.py --output target/android-parameters
+      - name: Build development APK
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          NDK_VERSION=$(python3 -c 'import json; print(json.load(open("android/build-inputs.json"))["ndk"])')
+          python3 scripts/build-courier.py --ndk "$ANDROID_HOME/ndk/$NDK_VERSION" --sdk "$ANDROID_HOME" --java-home "$JAVA_HOME" --gradle "$PARAMO1D_GRADLE" --artifacts target/android-parameters --go "$(command -v go)"
+          mkdir -p dist
+          cp android/app/build/outputs/apk/debug/app-debug.apk dist/paramo1d-debug-arm64.apk
+      - name: Build signed release APK
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          PARAMO1D_ANDROID_KEYSTORE_BASE64: ${{ secrets.PARAMO1D_ANDROID_KEYSTORE_BASE64 }}
+          PARAMO1D_ANDROID_STORE_PASSWORD: ${{ secrets.PARAMO1D_ANDROID_STORE_PASSWORD }}
+          PARAMO1D_ANDROID_KEY_ALIAS: paramo1d
+          PARAMO1D_ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/paramo1d-release.p12
+        run: |
+          python3 - <<'PY'
+          import base64, os, pathlib, re
+          version = re.search(r"versionName '([^']+)'", pathlib.Path('android/app/build.gradle').read_text()).group(1)
+          assert os.environ['GITHUB_REF_NAME'] == 'v' + version
+          encoded = os.environ['PARAMO1D_ANDROID_KEYSTORE_BASE64']
+          assert encoded and os.environ['PARAMO1D_ANDROID_STORE_PASSWORD'], 'Release signing secrets are required'
+          path = pathlib.Path(os.environ['PARAMO1D_ANDROID_KEYSTORE_PATH'])
+          path.write_bytes(base64.b64decode(encoded, validate=True))
+          path.chmod(0o600)
+          PY
+          trap 'rm -f "$PARAMO1D_ANDROID_KEYSTORE_PATH"' EXIT
+          NDK_VERSION=$(python3 -c 'import json; print(json.load(open("android/build-inputs.json"))["ndk"])')
+          python3 scripts/build-courier.py --ndk "$ANDROID_HOME/ndk/$NDK_VERSION" --sdk "$ANDROID_HOME" --java-home "$JAVA_HOME" --gradle "$PARAMO1D_GRADLE" --artifacts target/android-parameters --go "$(command -v go)" --variant release
+          mkdir -p dist
+          cp android/app/build/outputs/apk/release/app-release.apk "dist/paramo1d-$GITHUB_REF_NAME-arm64.apk"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "dist/paramo1d-$GITHUB_REF_NAME-arm64.apk" > dist/SIGNING-CERTIFICATE.txt
+      - name: Record APK hashes
+        working-directory: dist
+        run: sha256sum *.apk > SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: android-apk
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [checks, apk]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Download the checked APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name android-apk --dir dist
+      - name: Publish Android release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          sha256sum --check SHA256SUMS
+          cd ..
+          gh release create "$GITHUB_REF_NAME" dist/*.apk dist/SHA256SUMS dist/SIGNING-CERTIFICATE.txt --repo "$GITHUB_REPOSITORY" --title "Paramo1d $GITHUB_REF_NAME for Android" --notes-file android/RELEASE_NOTES.md --verify-tag

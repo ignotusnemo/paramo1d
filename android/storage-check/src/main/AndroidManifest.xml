@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application android:label="Paramo1d storage check" android:allowBackup="false" />
+    <instrumentation android:name="org.parano1d.courier.StorageCheck" android:targetPackage="org.parano1d.courier.storagecheck" />
+</manifest>
