@@ -304,7 +304,13 @@ fn owned_coin_set(
     }
     Ok(coins)
 }
-fn wallet_change_hint(args: &Value, address: Address) -> Result<Option<bool>> {
+#[derive(Debug, PartialEq, Eq)]
+enum WalletHint {
+    Unchanged,
+    CoinsChanged,
+    EpochChanged,
+}
+fn wallet_change_hint(args: &Value, address: Address) -> Result<Option<WalletHint>> {
     let path = directory(args)?.join("wallet-view.json");
     if !path.is_file() {
         return Ok(None);
@@ -315,6 +321,11 @@ fn wallet_change_hint(args: &Value, address: Address) -> Result<Option<bool>> {
     if proofs.is_empty() {
         return Ok(None);
     }
+    let epoch_slot = proofs
+        .iter()
+        .flat_map(|p| &p.slots)
+        .next()
+        .map(|s| s.slot_index);
     let saved = owned_coin_set(proofs.into_iter().flat_map(|p| p.slots), address)?;
     let mut rpc = crate::rpc::Rpc::watch(arg(args, "rpc")?)?;
     let live: Vec<Slot> =
@@ -325,18 +336,37 @@ fn wallet_change_hint(args: &Value, address: Address) -> Result<Option<bool>> {
     );
     // This comparison schedules verification. It never accepts a new balance,
     // State root, timestamp or spendable input from the unverified hint.
-    Ok(Some(saved != owned_coin_set(live, address)?))
+    if saved != owned_coin_set(live, address)? {
+        return Ok(Some(WalletHint::CoinsChanged));
+    }
+    if args["follow"].as_bool() == Some(true) && !saved.is_empty() {
+        let Some(index) = epoch_slot else {
+            return Ok(None);
+        };
+        let Ok((tip, _, _)) = crate::wallet_checkpoint::open(args, &cache["checkpoint"]) else {
+            return Ok(None);
+        };
+        let hint: Proof = serde_json::from_value(rpc.call("getSlotProof", json!([[index]]))?)?;
+        ensure!(
+            hint.slots.len() == 1 && hint.slots[0].slot_index == index,
+            "Node returned a different epoch probe slot"
+        );
+        if require_current_payment_epoch(tip.height, hint.height).is_err() {
+            return Ok(Some(WalletHint::EpochChanged));
+        }
+    }
+    Ok(Some(WalletHint::Unchanged))
 }
 pub fn synchronize(args: &Value) -> Result<Value> {
     let secret = seed(args)?;
     let address =
         noid_poseidon2b::primitives::derive_address(&crate::courier_api::spend_secret(&secret, 0));
-    if args["follow"].as_bool() == Some(true) {
-        if wallet_change_hint(args, address)? == Some(false) {
-            let observed = crate::mobile::observed_height(Path::new(arg(args, "artifacts")?))?;
-            return Ok(json!({"deferred":true,"observed_height":observed}));
-        }
+    let hint = wallet_change_hint(args, address)?;
+    if hint == Some(WalletHint::Unchanged) {
+        return Ok(json!({"deferred":true}));
     }
+    let _renewal =
+        (hint == Some(WalletHint::EpochChanged)).then(crate::mobile_control::renew_authorization);
     let (boundary, slots, proof_height) = view(args, address)?;
     let total = wallet_total(&slots, address)?;
     Ok(
@@ -676,6 +706,101 @@ mod tests {
         }
         assert_ne!(original, owned_coin_set([], address).unwrap());
         assert!(owned_coin_set([slot.clone(), slot], address).is_err());
+    }
+    #[test]
+    fn unchanged_manual_and_automatic_refreshes_need_no_chain_download() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::{Duration, Instant};
+
+        let master = [7; 32];
+        let address = noid_poseidon2b::primitives::derive_address(
+            &crate::courier_api::spend_secret(&master, 0),
+        );
+        let slot = json!({"slot_index":5,"value":20,"creation_id":1,"owner":address.to_bech32(),"empty":false});
+        let data = tempfile::tempdir().unwrap();
+        let args = json!({"seed_hex":hex::encode(master)});
+        let anchor = noid_chain::consensus::genesis::genesis_header();
+        let mut tip = anchor;
+        tip.height = 42;
+        let checkpoint = crate::wallet_checkpoint::seal(&args, &tip, &tip, &anchor).unwrap();
+        let proof = json!({"height":42,"block_hash":hex::encode(noid_chain::block_header::block_id(&tip)),"state_root":hex::encode(tip.state_root),"log_slots":4,"slots":[slot.clone()],"siblings":[]});
+        std::fs::write(
+            data.path().join("wallet-view.json"),
+            serde_json::to_vec(&json!({"proofs":[proof.clone()],"checkpoint":checkpoint})).unwrap(),
+        )
+        .unwrap();
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        server.set_nonblocking(true).unwrap();
+        let endpoint = format!("http://{}", server.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            for query in 0..5 {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    match server.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "Wallet hint request timed out");
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("{error}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut header = Vec::new();
+                while !header.ends_with(b"\r\n\r\n") {
+                    assert!(header.len() < 16384);
+                    header.push({
+                        let mut byte = [0];
+                        stream.read_exact(&mut byte).unwrap();
+                        byte[0]
+                    });
+                }
+                let header = String::from_utf8(header).unwrap();
+                let length = header
+                    .lines()
+                    .find_map(|line| {
+                        line.split_once(':')
+                            .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                            .map(|(_, value)| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                assert!(length < 16384);
+                let mut body = vec![0; length];
+                stream.read_exact(&mut body).unwrap();
+                let request: Value = serde_json::from_slice(&body).unwrap();
+                let result = if query == 2 || query == 4 {
+                    assert_eq!(request["method"], "paranoid_getSlotProof");
+                    assert_eq!(request["params"], json!([[5]]));
+                    let mut hint = proof.clone();
+                    hint["height"] = json!(if query == 4 { 144 } else { 43 });
+                    hint
+                } else {
+                    assert_eq!(request["method"], "paranoid_getSlotsByOwner");
+                    json!([slot.clone()])
+                };
+                let response = serde_json::to_vec(
+                    &json!({"jsonrpc":"2.0","id":request["id"],"result":result}),
+                )
+                .unwrap();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", response.len()).unwrap();
+                stream.write_all(&response).unwrap();
+            }
+        });
+        for follow in [false, true] {
+            let result = synchronize(&json!({"seed_hex":hex::encode(master),"data_dir":data.path(),"rpc":endpoint,"follow":follow})).unwrap();
+            assert_eq!(result["deferred"], true);
+            for field in ["balance", "height", "state_root", "observed_height"] {
+                assert!(
+                    result.get(field).is_none(),
+                    "An unverified hint must not update {field}"
+                );
+            }
+        }
+        assert_eq!(wallet_change_hint(&json!({"seed_hex":hex::encode(master),"data_dir":data.path(),"rpc":endpoint,"follow":true}),address).unwrap(),Some(WalletHint::EpochChanged),"The automatic check must schedule verification when an epoch changes, even with the same coins");
+        worker.join().unwrap();
     }
     #[test]
     fn completed_reservations_do_not_use_the_pending_payment_budget() {

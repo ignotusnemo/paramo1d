@@ -296,13 +296,14 @@ function renderWallet() {
   if (!state) return;
   $('wallet-address').textContent = state.profile?.address || '';
   $('balance').textContent = state.chain?.balance || '—';
-  const verifying = !!state.chain?.automatic && state.node?.phase === 'verifying';
+  const renewing = !!state.chain?.automatic && !!state.node?.renewing_authorization;
+  const verifying = !!state.chain?.automatic && state.node?.phase === 'verifying' && !renewing;
   const busy = !!state.chain?.running && !state.chain?.automatic || walletBusy || verifying;
-  $('node-status').textContent = busy ? verifying ? 'Checking a balance change…' : 'Updating your wallet…' : state.chain?.retrying ? 'Wallet will retry' : state.node?.phase === 'starting' ? 'Connecting…' : state.chain?.height ? state.connection?.online ? 'Wallet ready' : 'Saved balance' : 'Preparing your wallet…';
+  $('node-status').textContent = busy ? verifying ? 'Checking a balance change…' : 'Checking for payments…' : state.chain?.retrying ? 'Wallet will retry' : state.node?.phase === 'starting' ? 'Connecting…' : state.chain?.height ? state.connection?.online ? 'Wallet ready' : 'Saved balance' : 'Preparing your wallet…';
   $('node-status').classList.toggle('busy', busy);
   $('sync-button').disabled = busy;
-  $('sync-button').textContent = busy ? 'Updating…' : 'Update balance';
-  $('balance-description').textContent = busy ? verifying ? 'Verifying a change to your balance. You can keep chatting.' : 'Updating your balance. You can keep chatting.' : !state.chain?.height ? 'Open your wallet online before making your first payment.' : !state.connection?.online ? 'Saved balance. Reconnect to check for changes.' : state.chain?.retrying ? 'Showing your saved balance. Wallet updates will retry.' : 'Balance updates automatically.';
+  $('sync-button').textContent = busy ? verifying ? 'Updating…' : 'Checking…' : 'Update balance';
+  $('balance-description').textContent = busy ? verifying ? 'Verifying a change to your balance. You can keep chatting.' : 'Checking for new payments. You can keep chatting.' : !state.chain?.height ? 'Open your wallet online before making your first payment.' : !state.connection?.online ? 'Saved balance. Reconnect to check for changes.' : renewing ? 'Keeping payments ready in the background.' : state.chain?.retrying ? 'Showing your saved balance. Wallet updates will retry.' : 'Balance updates automatically.';
   const setup = $('wallet-setup'); setup.replaceChildren();
   if (!state.backup_saved) setup.append(element('section', { class: 'wallet-reminder' }, element('strong', { text: 'Keep access if you lose this phone' }), element('p', { text: 'Save an encrypted backup of your wallet and chats.' }), element('button', { class: 'outline-button', text: 'Save a backup', onclick: showBackup })));
   if (state.security && !state.security.available) setup.append(element('section', { class: 'wallet-reminder' }, element('strong', { text: 'Protect access to this wallet' }), element('p', { text: 'Set a phone PIN or fingerprint to lock Paramo1d when you leave it.' }), element('button', { class: 'outline-button', text: 'Set up phone screen lock', onclick: () => run(null, () => native('phone_security')) })));
@@ -664,9 +665,10 @@ $('receive-button').addEventListener('click', () => {
 });
 $('send-button').addEventListener('click', showSend);
 $('import-receipt-button').addEventListener('click', showImportReceipt);
-$('sync-button').addEventListener('click', () => run($('sync-button'), async () => {
+$('sync-button').addEventListener('click', () => run(null, async () => {
+  if (walletBusy) return;
   walletBusy = true; renderWallet();
-  try { state = await native('sync'); render(); toast('Balance updated.'); }
+  try { const before = state.chain?.balance; state = await native('sync'); render(); toast(state.chain?.running && state.chain?.automatic ? 'Your wallet is updating in the background.' : state.chain?.balance === before ? 'No new payments.' : 'Balance updated.'); }
   finally { walletBusy = false; renderWallet(); }
 }));
 document.addEventListener('visibilitychange', () => { reportVisibleChat(); clearInterval(pollTimer); if (!document.hidden) { poll(); pollTimer = setInterval(poll, 10000); } });

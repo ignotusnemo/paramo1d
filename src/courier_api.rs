@@ -53,7 +53,7 @@ pub fn dispatch(request: &Value) -> Result<Value> {
             crate::artifacts::matrix_cache_budget(0);
             Ok(json!({"trimmed":true}))
         }
-        "node_status" => Ok(json!({"phase":crate::mobile_control::phase()})),
+        "node_status" => Ok(json!({"phase":crate::mobile_control::phase(),"renewing_authorization":crate::mobile_control::renewing_authorization()})),
         "node_active" => {
             let active = request["active"]
                 .as_bool()

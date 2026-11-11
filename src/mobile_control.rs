@@ -4,7 +4,7 @@ use std::{
     future::{pending, Future},
     io,
     sync::{
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
         Mutex, OnceLock,
     },
 };
@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 static ACTIVE: OnceLock<Mutex<CancellationToken>> = OnceLock::new();
 static PHASE: AtomicU8 = AtomicU8::new(0);
+static RENEWING_AUTHORIZATION: AtomicBool = AtomicBool::new(false);
 thread_local! { static OPERATION: RefCell<Option<CancellationToken>> = const { RefCell::new(None) }; }
 pub fn set_active(active: bool) {
     let mut token = ACTIVE
@@ -44,6 +45,19 @@ pub fn verifying() {
     if !token().is_some_and(|t| t.is_cancelled()) {
         PHASE.store(3, Ordering::Relaxed);
     }
+}
+pub(crate) struct AuthorizationRenewal;
+impl Drop for AuthorizationRenewal {
+    fn drop(&mut self) {
+        RENEWING_AUTHORIZATION.store(false, Ordering::Relaxed);
+    }
+}
+pub(crate) fn renew_authorization() -> AuthorizationRenewal {
+    RENEWING_AUTHORIZATION.store(true, Ordering::Relaxed);
+    AuthorizationRenewal
+}
+pub(crate) fn renewing_authorization() -> bool {
+    RENEWING_AUTHORIZATION.load(Ordering::Relaxed)
 }
 pub fn token() -> Option<CancellationToken> {
     OPERATION.with(|slot| slot.borrow().clone())
@@ -105,6 +119,16 @@ pub async fn cancellable<T>(future: impl Future<Output = Result<T>>) -> Result<T
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn authorization_renewal_clears_on_failure() {
+        let result: Result<()> = (|| {
+            let _renewal = renew_authorization();
+            assert!(renewing_authorization());
+            anyhow::bail!("Interrupted renewal")
+        })();
+        assert!(result.is_err());
+        assert!(!renewing_authorization());
+    }
     #[test]
     fn a_new_session_cannot_uncancel_inflight_work() {
         let old = CancellationToken::new();

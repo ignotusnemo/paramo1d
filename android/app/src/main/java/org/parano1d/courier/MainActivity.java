@@ -70,6 +70,7 @@ public final class MainActivity extends Activity {
     private static boolean walletVisible;
     private static long nextNodeAttempt;
     private static PendingChain pendingChain;
+    private static PendingChain pendingRefresh;
     private final android.os.Handler nodeTimer = new android.os.Handler(android.os.Looper.getMainLooper());
     private final android.content.BroadcastReceiver screenOff = new android.content.BroadcastReceiver() {
         @Override public void onReceive(android.content.Context context, Intent intent) { pauseNode(); }
@@ -833,7 +834,15 @@ public final class MainActivity extends Activity {
     private void startChainAction(String id, JSONObject request, boolean automatic) throws Exception {
         requireIdentity();
         if (data.getJSONObject("chain").optBoolean("running")) {
-            if (!automatic && data.getJSONObject("chain").optBoolean("automatic") && pendingChain==null) { pendingChain=new PendingChain(this,id,new JSONObject(request.toString()));nextNodeAttempt=System.currentTimeMillis()+10000;nodeControl(false);return; }
+            if (!automatic && request.getString("op").equals("sync") && data.getJSONObject("chain").optBoolean("automatic")) {
+                if (pendingRefresh!=null || pendingChain!=null) throw new Exception("Wait for the current wallet operation");
+                if (nativeResult(new JSONObject().put("op","node_status")).optBoolean("renewing_authorization")) { reply(id,success(view()));return; }
+                pendingRefresh=new PendingChain(this,id,new JSONObject(request.toString()));
+                walletScreenAwake(true);
+                android.util.Log.i("Paramo1dWallet","Balance refresh joined the active check");
+                return;
+            }
+            if (!automatic && data.getJSONObject("chain").optBoolean("automatic") && pendingChain==null) { pendingChain=new PendingChain(this,id,new JSONObject(request.toString()));nextNodeAttempt=System.currentTimeMillis()+10000;return; }
             throw new Exception("Wait for the current wallet operation");
         }
         if (!nodeAllowed() && !request.getString("op").equals("payment_send")) throw new Exception("Open Paramo1d to update your wallet");
@@ -852,18 +861,23 @@ public final class MainActivity extends Activity {
             request.put("intent_hex", found.getJSONObject("message").getString("intent_hex"));
         }
         data.getJSONObject("chain").put("running", true).put("automatic",automatic);
+        try {
         publishView();
         if (!automatic) walletScreenAwake(true);
         chainWorker.execute(() -> {
             final long operationStarted=android.os.SystemClock.elapsedRealtime();
+            if (!automatic && request.optString("op").equals("sync")) android.util.Log.i("Paramo1dWallet","Balance refresh started");
             try {
                 final JSONObject completed = chainAction(request, snapshot);
                 postChainResult(() -> {
+                    Exception completionError = null;
                     try {
                         JSONObject result = completed;
-                        if(automatic && result.getJSONObject("chain").optBoolean("deferred")) {
-                            data.getJSONObject("chain").put("observed_height",result.getJSONObject("chain").optLong("observed_height")).put("retrying",false).put("watched_at_ms",System.currentTimeMillis()).put("watch_ms",android.os.SystemClock.elapsedRealtime()-operationStarted);
+                        if (request.optString("op").equals("sync") && (!automatic || pendingRefresh!=null || !result.getJSONObject("chain").optBoolean("deferred"))) android.util.Log.i("Paramo1dWallet","Balance refresh finished in "+(android.os.SystemClock.elapsedRealtime()-operationStarted)+" ms: "+(result.getJSONObject("chain").optBoolean("deferred")?"unchanged":"verified"));
+                        if(result.optJSONObject("chain")!=null && result.getJSONObject("chain").optBoolean("deferred")) {
+                            data.getJSONObject("chain").put("retrying",false).put("watched_at_ms",System.currentTimeMillis()).put("watch_ms",android.os.SystemClock.elapsedRealtime()-operationStarted).put("running",false).put("automatic",false);
                             nextNodeAttempt=System.currentTimeMillis()+10000;
+                            reply(id, success(view()));
                             return;
                         }
                         JSONObject oldChain=data.getJSONObject("chain");
@@ -906,12 +920,15 @@ public final class MainActivity extends Activity {
                         if (!automatic || changed) store.save(data);
                         if (automatic) nextNodeAttempt=System.currentTimeMillis()+3000;
                         publishView(); reply(id, success(op.equals("sync") ? view() : result));
-                    } catch (Exception error) { if(automatic)nextNodeAttempt=System.currentTimeMillis()+15000;reply(id, failure(error)); }
-                    finally { finishChainAction(); }
+                    } catch (Exception error) { completionError=error;if(automatic)nextNodeAttempt=System.currentTimeMillis()+15000;reply(id, failure(error)); }
+                    finally { finishChainAction(completionError); }
                 });
-            } catch (Exception error) { postChainResult(() -> { try { recordBroadcastFailure(request, error); if(automatic){nextNodeAttempt=System.currentTimeMillis()+15000;data.getJSONObject("chain").put("retrying",nodeAllowed());} reply(id, failure(error)); } catch(Exception ignored){} finally {finishChainAction();} }); }
-            finally { walletScreenAwake(false); }
+            } catch (Exception error) { postChainResult(() -> { try { if (request.optString("op").equals("sync") && (!automatic || pendingRefresh!=null)) android.util.Log.i("Paramo1dWallet","Balance refresh failed after "+(android.os.SystemClock.elapsedRealtime()-operationStarted)+" ms");recordBroadcastFailure(request, error); if(automatic){nextNodeAttempt=System.currentTimeMillis()+15000;data.getJSONObject("chain").put("retrying",nodeAllowed());} reply(id, failure(error)); } catch(Exception ignored){} finally {finishChainAction(error);} }); }
         });
+        } catch (Exception error) {
+            finishChainAction(error);
+            throw error;
+        }
     }
     private static void postChainResult(Runnable result) {
         // A completed wallet operation must reach the state worker even when
@@ -922,12 +939,19 @@ public final class MainActivity extends Activity {
             catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
         }
     }
-    private void finishChainAction() {
+    private void finishChainAction(Exception error) {
+        PendingChain refresh=pendingRefresh; pendingRefresh=null;
+        PendingChain pending=pendingChain; pendingChain=null;
+        walletScreenAwake(false);
         try {
             data.getJSONObject("chain").put("running",false).put("automatic",false); publishView();
-            PendingChain pending=pendingChain; pendingChain=null;
-            if(pending!=null) {try{pending.owner.startChainAction(pending.id,pending.request,false);}catch(Exception error){pending.owner.reply(pending.id,failure(error));}}
-        } catch(Exception ignored){}
+            if(refresh!=null) refresh.owner.reply(refresh.id,error==null?refresh.owner.success(view()):refresh.owner.failure(error));
+        } catch(Exception completionError) {
+            if(refresh!=null) refresh.owner.reply(refresh.id,refresh.owner.failure(error==null?completionError:error));
+        } finally {
+            if(refresh!=null) refresh.owner.walletScreenAwake(false);
+            if(pending!=null) {try{pending.owner.startChainAction(pending.id,pending.request,false);}catch(Exception nextError){pending.owner.reply(pending.id,pending.owner.failure(nextError));}}
+        }
     }
     private JSONObject chainAction(JSONObject request, JSONObject snapshot) throws Exception {
         String op = request.getString("op");
@@ -1166,7 +1190,10 @@ public final class MainActivity extends Activity {
     private static void publishView() throws Exception {
         final JSONObject updated = view(); MainActivity activity = active.get();
         if (activity != null && activity.appLock != null && activity.appLock.needsUnlock()) return;
-        final boolean checking = updated.optJSONObject("chain").optBoolean("running") && !updated.optJSONObject("chain").optBoolean("automatic");
+        if (pendingRefresh!=null && updated.optJSONObject("node").optBoolean("renewing_authorization") && updated.optJSONObject("chain").optBoolean("automatic")) {
+            PendingChain refresh=pendingRefresh;pendingRefresh=null;refresh.owner.walletScreenAwake(false);refresh.owner.reply(refresh.id,refresh.owner.success(updated));
+        }
+        final boolean checking = updated.optJSONObject("chain").optBoolean("running") && (!updated.optJSONObject("chain").optBoolean("automatic") || pendingRefresh!=null);
         final String script = "window.paramo1dUpdate(" + updated.toString() + ")";
         if (activity != null) activity.runOnUiThread(() -> { if (!activity.isDestroyed()) {
             if (checking) activity.getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);

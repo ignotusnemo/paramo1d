@@ -31,6 +31,7 @@ async function bridge(page) {
     window.Paramo1d = { request(id, encoded) {
       const request = JSON.parse(encoded); window.testCalls.push(request);
       let result = state;
+      if (request.op === 'sync' && window.testDeferSync) { window.testSyncRequest = id; return; }
       if (request.op === 'theme') state.settings.theme = request.value;
       if (request.op === 'create_identity') state.profile = { ...alice, name: request.name };
       if (request.op === 'app_lock') state.security.enabled = request.enabled;
@@ -237,6 +238,33 @@ async function main() {
     await page.evaluate(()=>{testState.node={phase:'verifying'};paramo1dUpdate(JSON.parse(JSON.stringify(testState)));});
     assert.equal(await page.locator('#node-status').innerText(),'Checking a balance change…');
     assert.equal(await page.locator('#balance').innerText(),'1.000000');
+    await page.evaluate(()=>{testState.node={phase:'following'};testDeferSync=true;paramo1dUpdate(JSON.parse(JSON.stringify(testState)));});
+    await page.locator('#sync-button').click();
+    await page.getByText('Checking for payments…',{exact:true}).waitFor();
+    assert.equal(await page.locator('#balance').innerText(),'1.000000','The verified balance stays visible during a refresh');
+    assert.equal(await page.locator('#sync-button').isDisabled(),true);
+    await page.evaluate(()=>{testState.chain.running=false;testState.chain.automatic=false;paramo1dReply(testSyncRequest,{ok:true,result:JSON.parse(JSON.stringify(testState))});});
+    await page.getByText('No new payments.',{exact:true}).waitFor();
+    assert.equal(await page.locator('#sync-button').isDisabled(),false);
+    assert.equal(await page.locator('#balance').innerText(),'1.000000');
+    assert.equal(await page.evaluate(()=>state.chain.height),100,'An unchanged refresh preserves the verified checkpoint');
+    await page.locator('#sync-button').click();
+    await page.getByText('Checking for payments…',{exact:true}).waitFor();
+    await page.evaluate(()=>{paramo1dReply(testSyncRequest,{ok:false,error:'Network unavailable. Please try again.'});});
+    await page.getByText('Network unavailable. Please try again.',{exact:true}).waitFor();
+    assert.equal(await page.locator('#sync-button').isDisabled(),false,'A failed refresh releases the button');
+    assert.equal(await page.locator('#balance').innerText(),'1.000000');
+    await page.evaluate(()=>{testState.chain.running=true;testState.chain.automatic=true;testState.connection.online=true;testState.node={phase:'verifying',renewing_authorization:true};paramo1dUpdate(JSON.parse(JSON.stringify(testState)));});
+    await page.getByText('Keeping payments ready in the background.',{exact:true}).waitFor();
+    assert.equal(await page.locator('#balance').innerText(),'1.000000');
+    assert.equal(await page.locator('#sync-button').isDisabled(),false,'Background epoch renewal keeps the balance controls available');
+    await page.locator('#sync-button').click();
+    await page.getByText('Checking for payments…',{exact:true}).waitFor();
+    await page.evaluate(()=>{paramo1dReply(testSyncRequest,{ok:true,result:JSON.parse(JSON.stringify(testState))});});
+    await page.getByText('Your wallet is updating in the background.',{exact:true}).waitFor();
+    assert.equal(await page.locator('#sync-button').isDisabled(),false,'Refreshing the balance must not wait for the background epoch renewal');
+    assert.equal(await page.locator('#balance').innerText(),'1.000000');
+    await page.evaluate(()=>{testDeferSync=false;});
     await page.setViewportSize({width:1280,height:800});
     await page.evaluate(()=>{testState.settings.theme='dark';paramo1dUpdate(JSON.parse(JSON.stringify(testState)));selectTab('direct');});
     await page.locator('#new-button').hover();
