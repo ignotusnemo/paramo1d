@@ -1,4 +1,4 @@
-Paramo1d 0.1.2 makes wallet refresh adaptive, renews payment epochs automatically and includes the conversation, QR scanning and connection improvements from 0.1.1.
+Paramo1d 0.1.1 brings adaptive wallet refresh, automatic payment epoch renewal, redesigned conversations, QR scanning and connection improvements.
 
 ### Wallet updates and payment readiness
 
@@ -8,7 +8,7 @@ Paramo1d 0.1.2 makes wallet refresh adaptive, renews payment epochs automaticall
 - **Available balance during renewal.** The balance stays visible and the refresh control remains available while the app prepares payments for the current epoch in the background.
 - **Reliable completion.** Errors and a full worker queue release the updating status. The app preserves the verified balance and can retry.
 
-New coins, changed inputs and a new transaction epoch still require independent State verification on the phone. The wallet uses its authenticated checkpoint and checked slot proofs to prepare payments. Online review and authorization check epoch freshness.
+New coins, changed inputs and a new transaction epoch trigger independent State verification on the phone. The wallet uses its authenticated checkpoint and checked slot proofs to prepare payments. Online review and authorization check epoch freshness.
 
 ### Conversations and contacts
 

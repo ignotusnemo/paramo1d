@@ -149,4 +149,15 @@ jobs:
           cd dist
           sha256sum --check SHA256SUMS
           cd ..
-          gh release create "$GITHUB_REF_NAME" dist/*.apk dist/SHA256SUMS dist/SIGNING-CERTIFICATE.txt --repo "$GITHUB_REPOSITORY" --title "Paramo1d $GITHUB_REF_NAME for Android" --notes-file android/RELEASE_NOTES.md --verify-tag
+          git fetch --no-tags --depth=1 origin "refs/tags/$GITHUB_REF_NAME"
+          CURRENT_TAG_COMMIT=$(git rev-parse 'FETCH_HEAD^{commit}')
+          if [ "$CURRENT_TAG_COMMIT" != "$GITHUB_SHA" ]; then
+            echo "The tag now points to a newer commit. This build will not publish."
+            exit 0
+          fi
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/*.apk dist/SHA256SUMS dist/SIGNING-CERTIFICATE.txt --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "Paramo1d $GITHUB_REF_NAME for Android" --notes-file android/RELEASE_NOTES.md --latest
+          else
+            gh release create "$GITHUB_REF_NAME" dist/*.apk dist/SHA256SUMS dist/SIGNING-CERTIFICATE.txt --repo "$GITHUB_REPOSITORY" --title "Paramo1d $GITHUB_REF_NAME for Android" --notes-file android/RELEASE_NOTES.md --verify-tag --latest
+          fi
