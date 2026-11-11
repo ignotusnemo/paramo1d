@@ -72,6 +72,7 @@ pub fn dispatch(request: &Value) -> Result<Value> {
         "contact_import" => {
             Ok(json!({"contact":paramo1d_courier::import_contact(text(request,"uri")?)?}))
         }
+        "qr_parse" => crate::qr::parse(text(request, "kind")?, text(request, "text")?),
         "verify_envelope" => {
             let envelope: Envelope = serde_json::from_value(request["envelope"].clone())?;
             envelope.verify(now(request)?)?;
@@ -187,7 +188,22 @@ pub fn dispatch(request: &Value) -> Result<Value> {
                 "Payment differs from the inspected transaction"
             );
             let mut rpc = crate::rpc::Rpc::new(text(request, "rpc")?)?;
-            let result = rpc.call("submitTxIntent", json!([text(request, "intent_hex")?]))?;
+            let result = match rpc.call("submitTxIntent", json!([text(request, "intent_hex")?])) {
+                Ok(result) => result,
+                Err(error) if error.to_string().contains("BadEpochAnchor") => {
+                    let txid = text(request, "txid")?;
+                    // A previously included payment can outlive its admission epoch.
+                    // A lookup remains a hint until its receipt is checked locally.
+                    let included = rpc.call("getTx", json!([txid]))?;
+                    if !included.is_null() {
+                        return Ok(
+                            json!({"submitted":true,"txid":txid,"confirmed":false,"already_known":true}),
+                        );
+                    }
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
+            };
             ensure!(
                 result.as_str() == preview["txid"].as_str(),
                 "Node returned a different transaction ID"
@@ -386,7 +402,13 @@ pub fn execute(bytes: &[u8]) -> Value {
         );
         if matches!(
             request["op"].as_str(),
-            Some("wallet_sync" | "sync_once" | "payment_preview" | "receipt_check")
+            Some(
+                "wallet_sync"
+                    | "sync_once"
+                    | "payment_preview"
+                    | "payment_authorize"
+                    | "receipt_check"
+            )
         ) {
             crate::mobile_control::run(|| dispatch(&request))
         } else {

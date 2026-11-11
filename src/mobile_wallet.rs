@@ -404,6 +404,32 @@ fn reservations(
     }
     Ok((inputs, outputs))
 }
+
+fn cached_headers(args: &Value) -> Result<(BlockHeader, BlockHeader, BlockHeader)> {
+    let bytes = crate::artifacts::read_bounded(
+        &directory(args)?.join("wallet-view.json"),
+        8 * 1024 * 1024,
+    )?;
+    let cache: Value = serde_json::from_slice(&bytes)?;
+    crate::wallet_checkpoint::open(args, &cache["checkpoint"])
+}
+
+fn require_current_payment_epoch(verified_height: u64, observed_height: u64) -> Result<()> {
+    let verified_child = verified_height
+        .checked_add(1)
+        .context("Payment height overflow")?;
+    let observed_child = observed_height
+        .checked_add(1)
+        .context("Observed height overflow")?;
+    ensure!(
+        observed_height <= verified_height
+            || noid_chain::consensus::tx_epoch_anchor_height_for_child(verified_child)
+                == noid_chain::consensus::tx_epoch_anchor_height_for_child(observed_child),
+        "Payment epoch changed. Update your wallet and review the payment again."
+    );
+    Ok(())
+}
+
 pub fn prepare(args: &Value) -> Result<Value> {
     let mut cached = args["use_cached"].as_bool() == Some(true);
     let master = seed(args)?;
@@ -414,26 +440,26 @@ pub fn prepare(args: &Value) -> Result<Value> {
     let payment = paramo1d_courier::amount_micronoid(arg(args, "amount")?)?;
     ensure!(payment > 0, "Payment must be positive");
     let mut effective = args.clone();
-    if cached && args["online"].as_bool() == Some(true) {
-        let observed = crate::mobile::observed_height(Path::new(arg(args, "artifacts")?))?;
-        let saved = crate::artifacts::read_bounded(
-            &directory(args)?.join("wallet-view.json"),
-            8 * 1024 * 1024,
-        )
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .and_then(|cache| crate::wallet_checkpoint::open(args, &cache["checkpoint"]).ok());
-        let usable = saved.is_some_and(|(tip, _, _)| {
-            observed <= tip.height
-                || noid_chain::consensus::tx_epoch_anchor_height_for_child(observed + 1)
-                    == noid_chain::consensus::tx_epoch_anchor_height_for_child(tip.height + 1)
-        });
+    let observed = if args["online"].as_bool() == Some(true) {
+        Some(crate::mobile::observed_height(Path::new(arg(
+            args,
+            "artifacts",
+        )?))?)
+    } else {
+        None
+    };
+    if let Some(observed) = observed.filter(|_| cached) {
+        let usable = cached_headers(args)
+            .is_ok_and(|(tip, _, _)| require_current_payment_epoch(tip.height, observed).is_ok());
         if !usable {
             effective["use_cached"] = Value::Bool(false);
             cached = false;
         }
     }
     let (boundary, slots, proof_height) = view(&effective, owner)?;
+    if let Some(observed) = observed {
+        require_current_payment_epoch(boundary.header.height, observed)?;
+    }
     let total_balance = wallet_total(&slots, owner)?;
     let epoch = noid_chain::consensus::tx_epoch_anchor_height_for_child(boundary.header.height + 1);
     let anchor = boundary.anchor.context("Verified epoch header")?;
@@ -534,7 +560,7 @@ pub fn prepare(args: &Value) -> Result<Value> {
         .map_err(|e| anyhow::anyhow!("Payment encoding: {e}"))?;
     let review_id = hex::encode(Sha256::digest(&unsigned));
     Ok(
-        json!({"review_id":review_id,"unsigned_intent":hex::encode(unsigned),"to":recipient.to_bech32(),"amount":amount(payment),"fee":amount(fee),"total":amount(payment+fee),"height":boundary.header.height,"balance_height":proof_height,"using_saved_state":cached,"wallet":{"height":boundary.header.height,"balance_height":proof_height,"balance":amount(total_balance),"balance_micronoid":total_balance.to_string(),"block_hash":hex::encode(noid_chain::block_header::block_id(&boundary.header))}}),
+        json!({"review_id":review_id,"unsigned_intent":hex::encode(unsigned),"to":recipient.to_bech32(),"amount":amount(payment),"fee":amount(fee),"total":amount(payment+fee),"height":boundary.header.height,"balance_height":proof_height,"valid_through_height":epoch.checked_add(noid_chain::consensus::params::TX_EPOCH_BLOCKS).context("Payment epoch overflow")?,"using_saved_state":cached,"wallet":{"height":boundary.header.height,"balance_height":proof_height,"balance":amount(total_balance),"balance_micronoid":total_balance.to_string(),"block_hash":hex::encode(noid_chain::block_header::block_id(&boundary.header))}}),
     )
 }
 pub fn authorize(args: &Value) -> Result<Value> {
@@ -561,6 +587,20 @@ pub fn authorize(args: &Value) -> Result<Value> {
             && p.body.validity_bitmap & noid_tx::PAGED_SPEND_V2_CONTRACT_MASK == 0),
         "This review is not an ordinary payment from your wallet"
     );
+    if args["data_dir"].is_string() {
+        let (tip, _, anchor) = cached_headers(args)?;
+        ensure!(
+            intent
+                .pages
+                .iter()
+                .all(|p| p.body.epoch_anchor == noid_chain::block_header::block_id(&anchor)),
+            "Payment epoch changed. Update your wallet and review the payment again."
+        );
+        if args["online"].as_bool() == Some(true) {
+            let observed = crate::mobile::observed_height(Path::new(arg(args, "artifacts")?))?;
+            require_current_payment_epoch(tip.height, observed)?;
+        }
+    }
     let auth = noid_gkr::wallet_authorization::prove_paged_spend_authorization(
         &intent.pages,
         noid_gkr::wallet_authorization::OwnerAuthWitness::new(secret),
@@ -591,6 +631,16 @@ pub fn authorize(args: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payment_epoch_guard_covers_boundary_and_stale_peers() {
+        assert!(require_current_payment_epoch(142, 143).is_ok());
+        assert!(require_current_payment_epoch(143, 144).is_err());
+        assert!(require_current_payment_epoch(144, 145).is_ok());
+        assert!(require_current_payment_epoch(287, 288).is_err());
+        assert!(require_current_payment_epoch(288, 287).is_ok());
+        assert!(require_current_payment_epoch(144, u64::MAX).is_err());
+    }
     #[test]
     fn wallet_watch_tracks_coin_changes_and_ignores_empty_output_hints() {
         let address = noid_poseidon2b::primitives::derive_address(
@@ -642,6 +692,8 @@ mod tests {
     #[test]
     fn an_authorized_noid_packet_can_be_forwarded_but_not_retargeted() {
         let seed = [7; 32];
+        let epoch_header = noid_chain::consensus::genesis::genesis_header();
+        let epoch_anchor = noid_chain::block_header::block_id(&epoch_header);
         let owner = noid_poseidon2b::primitives::derive_address(&crate::courier_api::spend_secret(
             &seed, 0,
         ));
@@ -649,7 +701,7 @@ mod tests {
             &crate::courier_api::spend_secret(&[8; 32], 0),
         );
         let mut body = TxBody {
-            epoch_anchor: [3; 32],
+            epoch_anchor,
             fee: 10_000,
             input_owner: owner,
             inputs: [TxInput::dummy(); 8],
@@ -671,17 +723,46 @@ mod tests {
             .unwrap()
             .to_bytes()
             .unwrap();
-        let authorized=authorize(&json!({"seed_hex":hex::encode(seed),"unsigned_intent":hex::encode(&unsigned),"review_id":hex::encode(Sha256::digest(&unsigned))})).unwrap();
+        let saved = tempfile::tempdir().unwrap();
+        let args = json!({"seed_hex":hex::encode(seed),"unsigned_intent":hex::encode(&unsigned),"review_id":hex::encode(Sha256::digest(&unsigned)),"data_dir":saved.path(),"online":false});
+        let mut tip = epoch_header;
+        tip.height = 143;
+        let checkpoint = crate::wallet_checkpoint::seal(&args, &tip, &tip, &epoch_header).unwrap();
+        std::fs::write(
+            saved.path().join("wallet-view.json"),
+            serde_json::to_vec(&json!({"checkpoint":checkpoint})).unwrap(),
+        )
+        .unwrap();
+        let authorized = authorize(&args).unwrap();
+
+        // The same review must be rejected after an authenticated epoch change.
+        tip.height = 144;
+        let checkpoint = crate::wallet_checkpoint::seal(&args, &tip, &tip, &tip).unwrap();
+        std::fs::write(
+            saved.path().join("wallet-view.json"),
+            serde_json::to_vec(&json!({"checkpoint":checkpoint})).unwrap(),
+        )
+        .unwrap();
+        assert!(authorize(&args)
+            .unwrap_err()
+            .to_string()
+            .starts_with("Payment epoch changed."));
         let reservation = &authorized["reservation"];
         let args = json!({"reservations":[reservation]});
-        let (reserved_inputs, reserved_outputs) = reservations(&args, [3; 32], 10).unwrap();
+        let (reserved_inputs, reserved_outputs) = reservations(&args, epoch_anchor, 10).unwrap();
         assert!(reserved_inputs.contains(&(5, 1)));
         assert!(!reserved_inputs.contains(&(5, 2)));
         assert!(reserved_outputs.contains(&7));
         assert!(reservations(&args, [4; 32], 10).unwrap().0.is_empty());
-        let included = json!({"reservations":[{"epoch_anchor":hex::encode([3;32]),"inputs":reservation["inputs"],"outputs":reservation["outputs"],"included_height":20}]});
-        assert!(!reservations(&included, [3; 32], 19).unwrap().0.is_empty());
-        assert!(reservations(&included, [3; 32], 20).unwrap().0.is_empty());
+        let included = json!({"reservations":[{"epoch_anchor":hex::encode(epoch_anchor),"inputs":reservation["inputs"],"outputs":reservation["outputs"],"included_height":20}]});
+        assert!(!reservations(&included, epoch_anchor, 19)
+            .unwrap()
+            .0
+            .is_empty());
+        assert!(reservations(&included, epoch_anchor, 20)
+            .unwrap()
+            .0
+            .is_empty());
         let preview =
             crate::courier_api::inspect_intent(authorized["intent_hex"].as_str().unwrap()).unwrap();
         assert_eq!(preview["txid"], authorized["txid"]);

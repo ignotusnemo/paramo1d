@@ -7,6 +7,7 @@ pub mod matrix_store;
 pub mod mobile;
 mod mobile_control;
 mod mobile_wallet;
+mod qr;
 mod network_route;
 pub mod rpc;
 mod verifier_session;

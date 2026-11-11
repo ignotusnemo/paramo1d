@@ -36,12 +36,16 @@ public final class MainActivity extends Activity {
     private AppLock appLock;
     private android.widget.FrameLayout root;
     private android.view.View lockScreen;
+    private android.widget.FrameLayout launchScreen;
     private boolean lockScreenHasCredential;
     private boolean lockScreenDark;
     private boolean interfaceLoaded;
     private boolean pageReady;
+    private boolean interfaceReady;
     private boolean backupPickerActive;
     private boolean entryPromptAttempted;
+    private static final int QR_SCAN_REQUEST = 64;
+    private volatile String pendingScanId, pendingScanKind;
     private final Set<Integer> unlockedSystemFlows = new HashSet<>();
     private static SecureStore store;
     private static android.content.Context application;
@@ -100,7 +104,7 @@ public final class MainActivity extends Activity {
         application = getApplicationContext();
         appLock = new AppLock(this);
         applySystemTheme(getSharedPreferences("interface",MODE_PRIVATE).getString("theme","system"));
-        if (!BuildConfig.DEBUG) getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
+        applyCapturePolicy();
         if (store == null) store = new SecureStore(getApplicationContext());
         web = new WebView(this);
         WebSettings settings = web.getSettings(); settings.setJavaScriptEnabled(true);
@@ -134,13 +138,13 @@ public final class MainActivity extends Activity {
 
     @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); setIntent(intent); handleContactIntent(intent); }
     @Override public void startActivityForResult(Intent intent, int request) {
-        if ((request == 62 || request == 63) && appLock != null && !appLock.needsUnlock()) unlockedSystemFlows.add(request);
+        if ((request == 62 || request == 63 || request == QR_SCAN_REQUEST) && appLock != null && !appLock.needsUnlock()) unlockedSystemFlows.add(request);
         super.startActivityForResult(intent, request);
     }
     @Override protected void onResume() {
         super.onResume(); visible = true;
         if (appLock != null && !appLock.authenticating()) {
-            if (appLock.needsUnlock()) { showLockScreen(); if (!entryPromptAttempted) { entryPromptAttempted = true; appLock.authenticate(this::openInterface, () -> {}); } }
+            if (appLock.needsUnlock()) { showLockScreen(); root.postOnAnimation(this::maybeUnlock); }
             else openInterface();
         }
         deliveryPoll();
@@ -151,15 +155,49 @@ public final class MainActivity extends Activity {
         if (appLock != null) { if (!appLock.authenticating()) entryPromptAttempted = false; appLock.backgrounded(); if (AppLock.enabled(this) && new File(getFilesDir(), "identity.pmc").isFile()) showLockScreen(); }
         super.onPause();
     }
+    @Override protected void onStop() {
+        entryPromptAttempted = false;
+        super.onStop();
+    }
+    @Override public void onWindowFocusChanged(boolean focused) {
+        super.onWindowFocusChanged(focused);
+        if (focused && root != null) root.postOnAnimation(this::maybeUnlock);
+    }
+    private void maybeUnlock() {
+        if (visible && hasWindowFocus() && appLock != null && appLock.needsUnlock() && !appLock.authenticating() && !entryPromptAttempted) unlockInterface();
+    }
+    private void unlockInterface() {
+        entryPromptAttempted = true;
+        appLock.authenticate(this::openInterface, this::showLockScreen);
+    }
     private void openInterface() {
         appLock.opened();
         entryPromptAttempted = false;
         if (lockScreen != null) lockScreen.setVisibility(android.view.View.GONE);
         web.setVisibility(android.view.View.VISIBLE);
-        if (BuildConfig.DEBUG) getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
+        if (!interfaceReady) showLaunchScreen();
+        applyCapturePolicy();
         if (!interfaceLoaded) { interfaceLoaded = true; web.loadUrl(ORIGIN + "/assets/index.html"); }
         else { if (pageReady) handleContactIntent(getIntent()); chatWorker.execute(() -> { try { if (data != null) publishView(); } catch (Exception ignored) {} }); }
         if (visible) { nextNodeAttempt=0;nodeControl(true); nodeTimer.removeCallbacks(nodeTick); nodeTimer.postDelayed(nodeTick,1000); }
+    }
+    private void showLaunchScreen() {
+        if (launchScreen == null) {
+            launchScreen = new android.widget.FrameLayout(this);
+            int size = Math.round(200 * getResources().getDisplayMetrics().density);
+            CoinView coin = new CoinView(this); coin.setContentDescription("Opening Paramo1d");
+            launchScreen.addView(coin, new android.widget.FrameLayout.LayoutParams(size, size, android.view.Gravity.CENTER));
+            root.addView(launchScreen, new android.widget.FrameLayout.LayoutParams(-1, -1));
+        }
+        applySystemTheme(getSharedPreferences("interface", MODE_PRIVATE).getString("theme", "system"));
+        launchScreen.setVisibility(android.view.View.VISIBLE); launchScreen.bringToFront();
+    }
+    private void hideLaunchScreen() {
+        interfaceReady = true;
+        if (launchScreen == null) return;
+        android.widget.FrameLayout finished = launchScreen; launchScreen = null;
+        if (android.animation.ValueAnimator.areAnimatorsEnabled() && finished.isShown()) finished.animate().alpha(0).setDuration(160).withEndAction(() -> root.removeView(finished)).start();
+        else root.removeView(finished);
     }
     private boolean nodeAllowed() {
         return visible && appLock!=null && !appLock.needsUnlock() && !getSystemService(android.app.KeyguardManager.class).isDeviceLocked() && getSystemService(android.os.PowerManager.class).isInteractive();
@@ -170,6 +208,7 @@ public final class MainActivity extends Activity {
     private void pauseNode() { nodeTimer.removeCallbacks(nodeTick); nodeControl(false); walletScreenAwake(false); if(BuildConfig.DEBUG) android.util.Log.d("Paramo1dNode","Paused"); }
     private void showLockScreen() {
         if (root == null) return;
+        if (launchScreen != null) launchScreen.setVisibility(android.view.View.GONE);
         web.setVisibility(android.view.View.INVISIBLE);
         getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
         boolean secure = AppLock.available(this);
@@ -180,14 +219,19 @@ public final class MainActivity extends Activity {
             lockScreenHasCredential = secure; lockScreenDark = dark;
             int ink = dark ? Color.rgb(238,246,239) : Color.rgb(7,18,13);
             android.widget.LinearLayout panel = new android.widget.LinearLayout(this); panel.setOrientation(android.widget.LinearLayout.VERTICAL); panel.setGravity(android.view.Gravity.CENTER); int padding = (int)(28 * getResources().getDisplayMetrics().density); panel.setPadding(padding,padding,padding,padding); panel.setBackgroundColor(dark ? Color.rgb(16,20,19) : Color.rgb(246,246,238));
-            android.widget.ImageView logo = new android.widget.ImageView(this); logo.setImageResource(R.mipmap.ic_launcher); int logoSize = (int)(72 * getResources().getDisplayMetrics().density); android.widget.LinearLayout.LayoutParams logoLayout = new android.widget.LinearLayout.LayoutParams(logoSize,logoSize); logoLayout.bottomMargin = padding; panel.addView(logo,logoLayout);
-            android.widget.TextView title = new android.widget.TextView(this); title.setText("Paramo1d"); title.setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD); title.setTextSize(30); title.setTextColor(ink); panel.addView(title);
-            android.widget.TextView explanation = new android.widget.TextView(this); explanation.setText("Unlock to open your messages and wallet.\nUse your fingerprint or phone PIN."); explanation.setTextSize(16); explanation.setTextColor(ink); explanation.setGravity(android.view.Gravity.CENTER); explanation.setPadding(0,padding,0,padding); panel.addView(explanation);
-            android.widget.Button unlock = new android.widget.Button(this); unlock.setText("Unlock Paramo1d"); unlock.setAllCaps(false); unlock.setTextColor(Color.rgb(7,18,13)); unlock.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.rgb(0,255,128))); unlock.setOnClickListener(v -> appLock.authenticate(this::openInterface, () -> {})); panel.addView(unlock);
+            CoinView logo = new CoinView(this); logo.setImportantForAccessibility(android.view.View.IMPORTANT_FOR_ACCESSIBILITY_NO); int logoSize = (int)(164 * getResources().getDisplayMetrics().density); android.widget.LinearLayout.LayoutParams logoLayout = new android.widget.LinearLayout.LayoutParams(logoSize,logoSize); logoLayout.bottomMargin = padding / 2; panel.addView(logo,logoLayout);
+            android.widget.TextView title = new android.widget.TextView(this); title.setText("Paramo1d"); title.setTypeface(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD); title.setTextSize(30); title.setTextColor(ink); title.setGravity(android.view.Gravity.CENTER); title.setMaxLines(1); title.setAutoSizeTextTypeUniformWithConfiguration(20, 30, 1, android.util.TypedValue.COMPLEX_UNIT_SP);
+            android.widget.LinearLayout.LayoutParams titleLayout = new android.widget.LinearLayout.LayoutParams(-1, -2); titleLayout.bottomMargin = padding; panel.addView(title, titleLayout);
+            android.widget.Button unlock = new android.widget.Button(this); unlock.setText("Unlock Paramo1d"); unlock.setAllCaps(false); unlock.setTextColor(Color.rgb(7,18,13));
+            android.graphics.drawable.GradientDrawable buttonShape = new android.graphics.drawable.GradientDrawable(); buttonShape.setColor(Color.rgb(0,255,128)); buttonShape.setCornerRadius(12 * getResources().getDisplayMetrics().density);
+            unlock.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(0x2807120d), buttonShape, null)); unlock.setMinHeight(Math.round(48 * getResources().getDisplayMetrics().density)); unlock.setPadding(padding, 0, padding, 0);
+            unlock.setOnClickListener(v -> unlockInterface()); panel.addView(unlock);
             if (!AppLock.available(this)) { unlock.setEnabled(false); android.widget.Button setup = new android.widget.Button(this); setup.setText("Set up phone screen lock"); setup.setAllCaps(false); setup.setOnClickListener(v -> startActivity(new Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS))); panel.addView(setup); }
-            lockScreen = panel; root.addView(panel, new android.widget.FrameLayout.LayoutParams(-1,-1));
+            android.widget.ScrollView scroll = new android.widget.ScrollView(this); scroll.setFillViewport(true); scroll.setClipToPadding(false); scroll.addView(panel, new android.widget.ScrollView.LayoutParams(-1,-2));
+            lockScreen = scroll; root.addView(scroll, new android.widget.FrameLayout.LayoutParams(-1,-1));
         }
         lockScreen.setVisibility(android.view.View.VISIBLE);
+        applyCapturePolicy();
     }
     private void handleContactIntent(Intent intent) {
         if (appLock.needsUnlock() || !pageReady) return;
@@ -206,6 +250,9 @@ public final class MainActivity extends Activity {
     private JSONObject success(Object result) { try { return new JSONObject().put("ok", true).put("result", result); } catch (org.json.JSONException impossible) { throw new IllegalStateException(impossible); } }
     private JSONObject failure(Exception error) { try { return new JSONObject().put("ok", false).put("error", error.getMessage() == null ? "Operation failed" : error.getMessage()); } catch (org.json.JSONException impossible) { throw new IllegalStateException(impossible); } }
     private final class Bridge {
+        @JavascriptInterface public void ready() {
+            runOnUiThread(() -> { if (!isFinishing() && !isDestroyed() && !appLock.needsUnlock()) hideLaunchScreen(); });
+        }
         @JavascriptInterface public void request(String id, String encoded) {
             if (id.length() > 32 || encoded.length() > 2 * 1024 * 1024) { reply(id, failure(new Exception("Request exceeds limit"))); return; }
             try { chatWorker.execute(() -> {
@@ -225,6 +272,7 @@ public final class MainActivity extends Activity {
         if (!data.has("settings")) data.put("settings", new JSONObject().put("relays", new JSONArray().put("https://chat.parano1d.org")).put("rpc", "https://chat.parano1d.org/chain"));
         if (!data.has("cursors")) data.put("cursors", new JSONObject());
         if (!data.has("read_messages")) data.put("read_messages", new JSONObject());
+        if (!data.has("drafts")) data.put("drafts", new JSONObject());
         if (!data.has("chain")) data.put("chain", new JSONObject());
         if (!data.has("background_delivery")) data.put("background_delivery",true);
         data.put("connection", new JSONObject().put("online", false));
@@ -241,9 +289,9 @@ public final class MainActivity extends Activity {
     }
     private static JSONObject view() throws Exception {
         JSONObject result = new JSONObject();
-        for (String key : new String[]{"profile", "invite", "contacts", "messages", "receipts", "settings", "chain", "connection", "observations"}) if (data.has(key)) result.put(key, data.get(key));
+        for (String key : new String[]{"profile", "invite", "contacts", "messages", "receipts", "settings", "chain", "connection", "observations", "drafts"}) if (data.has(key)) result.put(key, data.get(key));
         JSONArray pending = new JSONArray(), packets = data.getJSONArray("prepared_payments");
-        for (int i = 0; i < packets.length(); i++) { JSONObject packet = packets.getJSONObject(i), entry = new JSONObject(); for (String key : new String[]{"txid", "to", "amount", "fee", "submitted", "created_ms", "delivery_error"}) if (packet.has(key)) entry.put(key, packet.get(key)); pending.put(entry); }
+        for (int i = 0; i < packets.length(); i++) { JSONObject packet = packets.getJSONObject(i), entry = new JSONObject(); for (String key : new String[]{"txid", "to", "amount", "fee", "submitted", "created_ms", "delivery_error", "chat", "invoice_id", "valid_through_height", "replaced_by"}) if (packet.has(key)) entry.put(key, packet.get(key)); pending.put(entry); }
         result.put("prepared_payments", pending);
         result.put("nearby", NearbyService.snapshot());
         result.put("protection", tunnelState);
@@ -251,6 +299,7 @@ public final class MainActivity extends Activity {
         result.put("delivery_running", DeliveryService.isRunning());
         if(data.has("seed_hex")) result.put("node",nativeResult(new JSONObject().put("op","node_status")));
         result.put("security", AppLock.state(application));
+        result.put("allow_screenshots", application.getSharedPreferences("interface", MODE_PRIVATE).getBoolean("allow_screenshots", false));
         result.put("backup_saved", data.optLong("backup_saved_ms") > 0);
         result.put("storage_full", data.optBoolean("storage_full"));
         result.put("notifications_enabled", application.getSystemService(android.app.NotificationManager.class).areNotificationsEnabled());
@@ -302,6 +351,31 @@ public final class MainActivity extends Activity {
         requireIdentity();
         switch (op) {
             case "app_lock": AppLock.setEnabled(this, request.getBoolean("enabled")); return view();
+            case "allow_screenshots": {
+                getSharedPreferences("interface", MODE_PRIVATE).edit().putBoolean("allow_screenshots", request.getBoolean("enabled")).apply();
+                runOnUiThread(this::applyCapturePolicy); return view();
+            }
+            case "scan_qr": {
+                String kind = request.getString("kind"), scanId = request.getString("scan_id");
+                if (!(kind.equals("address") || kind.equals("contact")) || !scanId.matches("[0-9]{1,12}")) throw new Exception("Choose an address or contact to scan.");
+                if (pendingScanId != null) throw new Exception("Finish the current scan first.");
+                pendingScanKind = kind; pendingScanId = scanId;
+                runOnUiThread(() -> {
+                    try {
+                        if (appLock.needsUnlock() || !visible) throw new Exception("Unlock Paramo1d before scanning.");
+                        com.journeyapps.barcodescanner.ScanOptions options = new com.journeyapps.barcodescanner.ScanOptions()
+                            .setDesiredBarcodeFormats(com.journeyapps.barcodescanner.ScanOptions.QR_CODE)
+                            .setCaptureActivity(QrScanActivity.class).setBeepEnabled(false).setBarcodeImageEnabled(false).setOrientationLocked(false)
+                            .setPrompt(kind.equals("contact") ? "Point your camera at a Paramo1d contact QR code." : "Point your camera at a NOID receiving QR code.");
+                        Intent scan = options.createScanIntent(this).putExtra("paramo1d.scan.kind", kind);
+                        startActivityForResult(scan, QR_SCAN_REQUEST);
+                    } catch (Exception unavailable) {
+                        pendingScanId = null; pendingScanKind = null;
+                        try { deliverScan(new JSONObject().put("scan_id", scanId).put("error", "The camera could not be opened. You can paste the text instead.")); } catch (Exception ignored) {}
+                    }
+                });
+                return new JSONObject().put("opening", true);
+            }
             case "lock_now": appLock.lock(); pauseNode(); runOnUiThread(this::showLockScreen); return new JSONObject().put("locked", true);
             case "phone_security": runOnUiThread(() -> startActivity(new Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS))); return new JSONObject().put("opening", true);
             case "notification_settings": runOnUiThread(() -> startActivity(new Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(android.provider.Settings.EXTRA_APP_PACKAGE,getPackageName()))); return new JSONObject().put("opening", true);
@@ -349,7 +423,29 @@ public final class MainActivity extends Activity {
             case "join_group": if (!request.getString("room").equals("parano1d")) throw new Exception("This version uses the community chat"); return view();
             case "import_contact": return addContact(core("contact_import", new JSONObject().put("uri", request.getString("uri"))).getJSONObject("contact"));
             case "add_contact": return addContact(request.getJSONObject("contact"));
-            case "send": sendMessage(request.getString("chat"), request.getJSONObject("message")); flushOutbox(); store.save(data); return view();
+            case "send": sendMessage(request.getString("chat"), request.getJSONObject("message")); data.getJSONObject("drafts").remove(request.getString("chat")); flushOutbox(); store.save(data); return view();
+            case "save_draft": {
+                String scope = request.getString("chat"), text = request.optString("text"), reply = request.optString("reply_to");
+                if (!scope.equals("g:parano1d") && !scope.matches("d:[0-9a-f]{64}")) throw new Exception("Choose a conversation.");
+                if (text.getBytes(StandardCharsets.UTF_8).length > 4096 || !reply.isEmpty() && !reply.matches("[0-9a-f]{64}")) throw new Exception("Draft exceeds the message limit.");
+                JSONObject drafts = data.getJSONObject("drafts");
+                JSONObject next = new JSONObject().put("text", text).put("reply_to", reply);
+                if (!drafts.has(scope) && text.isEmpty() && reply.isEmpty() || drafts.has(scope) && drafts.getJSONObject(scope).toString().equals(next.toString())) return new JSONObject().put("saved", true);
+                if (text.isEmpty() && reply.isEmpty()) drafts.remove(scope);
+                else {
+                    if (!drafts.has(scope) && drafts.length() >= 1001) throw new Exception("Too many saved drafts.");
+                    drafts.put(scope, next);
+                }
+                store.save(data); return new JSONObject().put("saved", true);
+            }
+            case "preview_contact": return core("contact_import", new JSONObject().put("uri", request.getString("uri")));
+            case "open_link": {
+                String target = request.getString("url");
+                java.net.URI link = new java.net.URI(target);
+                if (target.length() > 8192 || !("https".equalsIgnoreCase(link.getScheme()) || "http".equalsIgnoreCase(link.getScheme())) || link.getHost() == null || link.getUserInfo() != null) throw new Exception("Choose a valid web link.");
+                runOnUiThread(() -> { try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(target)).addCategory(Intent.CATEGORY_BROWSABLE)); } catch (android.content.ActivityNotFoundException unavailable) { android.widget.Toast.makeText(this, "Install a browser to open web links.", android.widget.Toast.LENGTH_SHORT).show(); } });
+                return new JSONObject().put("opening", true);
+            }
             case "invoice": {
                 core("amount", new JSONObject().put("amount", request.getString("amount")));
                 String address = data.getJSONObject("profile").getString("address");
@@ -790,6 +886,13 @@ public final class MainActivity extends Activity {
                         }
                         if (op.equals("payment_send")) {
                             data.remove("pending_review"); data.getJSONArray("prepared_payments").put(result);
+                            if (!result.optString("replaces_txid").isEmpty()) {
+                                JSONArray packets = data.getJSONArray("prepared_payments");
+                                for (int i = 0; i < packets.length(); i++) {
+                                    JSONObject previous = packets.getJSONObject(i);
+                                    if (previous.optString("txid").equals(result.getString("replaces_txid")) && epochRejection(previous.optString("delivery_error"))) previous.put("replaced_by", result.getString("txid"));
+                                }
+                            }
                             store.save(data);
                             String destination = result.optString("chat");
                             if (destination.startsWith("d:")) try { sendMessage(destination, new JSONObject().put("type", "transaction").put("intent_hex", result.getString("intent_hex"))); } catch (Exception deferredChat) { result.put("chat_delivery_error", deferredChat.getMessage()); }
@@ -798,7 +901,7 @@ public final class MainActivity extends Activity {
                             flushOutbox(); result = new JSONObject().put("state", view()).put("txid", result.getString("txid")).put("submitted", false).put("delivery_queued", !data.getJSONObject("settings").optString("rpc").isEmpty());
                         }
                         if (op.equals("receipt_verify")) { JSONObject receipt = result.getJSONObject("receipt"); boolean exists = false; JSONArray receipts = data.getJSONArray("receipts"); for (int i = 0; i < receipts.length(); i++) if (receipts.getJSONObject(i).getString("txid").equals(receipt.getString("txid"))) { JSONObject previous = receipts.getJSONObject(i); for (String key : new String[]{"message_id","invoice_id"}) if (receipt.optString(key).isEmpty()) receipt.put(key,previous.optString(key)); receipts.put(i,receipt); exists = true; break; } if (!exists) receipts.put(receipt); result.put("state", view()); }
-                        if (op.equals("broadcast_send")) { String destination = "g:parano1d"; JSONArray messages = data.getJSONArray("messages"); for (int i = 0; i < messages.length(); i++) if (messages.getJSONObject(i).getString("id").equals(request.getString("message_id"))) destination = messages.getJSONObject(i).getString("chat"); watch(result.getString("txid"), destination); sendMessage(destination, new JSONObject().put("type", "relay_update").put("txid", result.getString("txid")).put("stage", "submitted").put("receipt_hex", JSONObject.NULL)); flushOutbox(); }
+                        if (op.equals("broadcast_send")) { String destination = "g:parano1d"; JSONArray messages = data.getJSONArray("messages"); for (int i = 0; i < messages.length(); i++) if (messages.getJSONObject(i).getString("id").equals(request.getString("message_id"))) { destination = messages.getJSONObject(i).getString("chat"); messages.getJSONObject(i).remove("broadcast_error"); } watch(result.getString("txid"), destination); sendMessage(destination, new JSONObject().put("type", "relay_update").put("txid", result.getString("txid")).put("stage", "submitted").put("receipt_hex", JSONObject.NULL)); flushOutbox(); }
                         data.getJSONObject("chain").put("retrying",false);
                         if (!automatic || changed) store.save(data);
                         if (automatic) nextNodeAttempt=System.currentTimeMillis()+3000;
@@ -806,7 +909,7 @@ public final class MainActivity extends Activity {
                     } catch (Exception error) { if(automatic)nextNodeAttempt=System.currentTimeMillis()+15000;reply(id, failure(error)); }
                     finally { finishChainAction(); }
                 });
-            } catch (Exception error) { postChainResult(() -> { try { if(automatic){nextNodeAttempt=System.currentTimeMillis()+15000;data.getJSONObject("chain").put("retrying",nodeAllowed());} reply(id, failure(error)); } catch(Exception ignored){} finally {finishChainAction();} }); }
+            } catch (Exception error) { postChainResult(() -> { try { recordBroadcastFailure(request, error); if(automatic){nextNodeAttempt=System.currentTimeMillis()+15000;data.getJSONObject("chain").put("retrying",nodeAllowed());} reply(id, failure(error)); } catch(Exception ignored){} finally {finishChainAction();} }); }
             finally { walletScreenAwake(false); }
         });
     }
@@ -846,7 +949,7 @@ public final class MainActivity extends Activity {
                     for (int j = 0; j < receipts.length(); j++) { JSONObject receipt = receipts.getJSONObject(j); if (receipt.optBoolean("verified") && receipt.optString("txid").equals(packet.getString("txid"))) reservation.put("included_height", receipt.getLong("height")); }
                     reservations.put(reservation);
                 }
-                return nativeResult(args.put("reservations", reservations)).put("chat", request.optString("chat")).put("invoice_id", request.optString("invoice_id"));
+                return nativeResult(args.put("reservations", reservations)).put("chat", request.optString("chat")).put("invoice_id", request.optString("invoice_id")).put("replaces_txid", request.optString("replaces_txid"));
             }
             if (!rpc.isEmpty()) return new JSONObject().put("chain", nativeResult(args.put("op", "wallet_sync")));
             JSONObject synced = nativeResult(args.put("op", "sync_once")); return new JSONObject().put("chain", synced.getJSONObject("verified"));
@@ -854,8 +957,9 @@ public final class MainActivity extends Activity {
         if (op.equals("payment_send")) {
             JSONObject review = snapshot.getJSONObject("pending_review");
             if (!review.getString("review_id").equals(request.getString("review_id"))) throw new Exception("Payment review has changed");
-            JSONObject authorized = nativeResult(new JSONObject().put("op", "payment_authorize").put("seed_hex", snapshot.getString("seed_hex")).put("review_id", review.getString("review_id")).put("unsigned_intent", review.getString("unsigned_intent")));
-            authorized.put("chat", review.optString("chat")).put("invoice_id", review.optString("invoice_id"));
+            JSONObject authorized = nativeResult(new JSONObject().put("op", "payment_authorize").put("seed_hex", snapshot.getString("seed_hex")).put("review_id", review.getString("review_id")).put("unsigned_intent", review.getString("unsigned_intent")).put("data_dir", chain.getAbsolutePath()).put("artifacts", artifacts.getAbsolutePath()).put("online", snapshot.optBoolean("online")));
+            authorized.put("chat", review.optString("chat")).put("invoice_id", review.optString("invoice_id")).put("replaces_txid", review.optString("replaces_txid"));
+            if (review.has("valid_through_height")) authorized.put("valid_through_height", review.getLong("valid_through_height"));
             for (String key : new String[]{"to", "amount", "fee"}) authorized.put(key, review.get(key));
             authorized.put("submitted", false).put("created_ms", System.currentTimeMillis());
             return authorized;
@@ -899,6 +1003,22 @@ public final class MainActivity extends Activity {
     @Override protected void onActivityResult(int request, int result, Intent intent) {
         super.onActivityResult(request, result, intent);
         if (appLock.activityResult(request, result)) return;
+        if (request == QR_SCAN_REQUEST) {
+            String scanId = pendingScanId, kind = pendingScanKind;
+            pendingScanId = null; pendingScanKind = null;
+            boolean permitted = unlockedSystemFlows.remove(request);
+            if (permitted) appLock.opened();
+            if (scanId == null) return;
+            String contents = com.journeyapps.barcodescanner.ScanIntentResult.parseActivityResult(result, intent).getContents();
+            chatWorker.execute(() -> {
+                try {
+                    JSONObject response = contents == null || !permitted ? new JSONObject().put("cancelled", true)
+                        : nativeResult(new JSONObject().put("op", "qr_parse").put("kind", kind).put("text", contents));
+                    deliverScan(response.put("scan_id", scanId));
+                } catch (Exception error) { try { deliverScan(new JSONObject().put("scan_id", scanId).put("error", error.getMessage())); } catch (Exception ignored) {} }
+            });
+            return;
+        }
         if (unlockedSystemFlows.remove(request)) appLock.opened();
         if ((request == 40 || request == 41) && backupPickerActive) { backupPickerActive = false; appLock.opened(); }
         if (request == 40 && result == RESULT_OK && intent != null && pendingBackup != null) {
@@ -953,6 +1073,18 @@ public final class MainActivity extends Activity {
         for (int i = 0; i < watches.length(); i++) if (watches.getJSONObject(i).getString("txid").equals(txid) && watches.getJSONObject(i).getString("chat").equals(chat)) return;
         if (watches.length() < 20) watches.put(new JSONObject().put("txid", txid).put("chat", chat).put("created_ms", now).put("last_ms", 0).put("stage", "submitted"));
     }
+    private static boolean epochRejection(String error) {
+        return error.contains("BadEpochAnchor") || error.startsWith("Payment epoch changed.");
+    }
+    private static void recordBroadcastFailure(JSONObject request, Exception error) throws Exception {
+        if (!request.optString("op").equals("broadcast_send") || !epochRejection(String.valueOf(error.getMessage()))) return;
+        JSONArray messages = data.getJSONArray("messages");
+        for (int i = 0; i < messages.length(); i++) {
+            JSONObject message = messages.getJSONObject(i);
+            if (message.optString("id").equals(request.optString("message_id"))) message.put("broadcast_error", String.valueOf(error.getMessage()).substring(0, Math.min(300, String.valueOf(error.getMessage()).length())));
+        }
+        store.save(data);
+    }
     private static void queueOwnBroadcast(JSONObject packet) throws Exception {
         String rpc = data.getJSONObject("settings").optString("rpc"); if (rpc.isEmpty()) return;
         String txid = packet.getString("txid"); if (!sendingPayments.add(txid)) return;
@@ -975,7 +1107,7 @@ public final class MainActivity extends Activity {
         if (!data.getJSONObject("connection").optBoolean("online") || tunnelStarting) return;
         long now = System.currentTimeMillis(); JSONArray packets = data.getJSONArray("prepared_payments"), receipts = data.getJSONArray("receipts");
         for (int i = 0; i < packets.length(); i++) { JSONObject packet = packets.getJSONObject(i);
-            if (packet.optBoolean("submitted") || sendingPayments.contains(packet.getString("txid")) || now - packet.optLong("created_ms",now) >= 3600000 || !reconnected && now - packet.optLong("last_delivery_ms") < 30000) continue;
+            if (packet.optBoolean("submitted") || packet.has("replaced_by") || epochRejection(packet.optString("delivery_error")) || sendingPayments.contains(packet.getString("txid")) || now - packet.optLong("created_ms",now) >= 3600000 || !reconnected && now - packet.optLong("last_delivery_ms") < 30000) continue;
             boolean checked = false; for (int j = 0; j < receipts.length(); j++) if (receipts.getJSONObject(j).optBoolean("verified") && receipts.getJSONObject(j).optString("txid").equals(packet.getString("txid"))) { checked = true; break; }
             if (!checked) { queueOwnBroadcast(packet); break; }
         }
@@ -1101,12 +1233,22 @@ public final class MainActivity extends Activity {
         return new JSONObject().put("id", id).put("new", true);
     }
     @Override protected void onDestroy() { nodeTimer.removeCallbacks(nodeTick);try{unregisterReceiver(screenOff);}catch(Exception ignored){}if (appLock != null) appLock.destroy(); if (active.get() == this) {pauseNode();active.clear();} web.removeJavascriptInterface("Paramo1d"); web.destroy(); super.onDestroy(); }
+    private void deliverScan(JSONObject result) {
+        String script = "window.paramo1dScanResult(" + result.toString() + ")";
+        runOnUiThread(() -> { if (!isFinishing() && !isDestroyed() && pageReady) web.evaluateJavascript(script, null); });
+    }
+    private void applyCapturePolicy() {
+        boolean allow = getSharedPreferences("interface", MODE_PRIVATE).getBoolean("allow_screenshots", false);
+        if (allow || BuildConfig.DEBUG && appLock != null && !appLock.needsUnlock()) getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
+        else getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE);
+    }
     private void applySystemTheme(String selected) {
         boolean dark = selected.equals("dark") || selected.equals("system") && (getResources().getConfiguration().uiMode & android.content.res.Configuration.UI_MODE_NIGHT_MASK) == android.content.res.Configuration.UI_MODE_NIGHT_YES;
         int paper=dark?Color.rgb(16,20,19):Color.rgb(246,246,238);
         getWindow().setBackgroundDrawable(new android.graphics.drawable.ColorDrawable(paper));
         getWindow().getDecorView().setBackgroundColor(paper);
         if(root!=null) root.setBackgroundColor(paper);
+        if(launchScreen!=null) launchScreen.setBackgroundColor(paper);
         if(web!=null) web.setBackgroundColor(paper);
         getWindow().setStatusBarColor(paper);
         getWindow().setNavigationBarColor(paper);

@@ -32,6 +32,7 @@ import (
 	"github.com/amnezia-vpn/amneziawg-go/v3/device"
 	"github.com/amnezia-vpn/amneziawg-go/v3/tun/netstack"
 	"github.com/gorilla/websocket"
+	"github.com/ignotusnemo/paramo1d/tunnel/internal/idleconn"
 	"github.com/ignotusnemo/paramo1d/tunnel/internal/wsstream"
 )
 
@@ -234,6 +235,7 @@ func Start(config Config) (*Client, error) {
 			http.Error(w, "Protected connection unavailable", 502)
 			return
 		}
+		remote = idleconn.New(remote, 8*time.Minute)
 		defer remote.Close()
 		local, buffer, e := w.(http.Hijacker).Hijack()
 		if e != nil {
@@ -244,8 +246,6 @@ func Start(config Config) (*Client, error) {
 		c.connections[local] = true
 		c.mu.Unlock()
 		defer func() { c.mu.Lock(); delete(c.connections, local); c.mu.Unlock() }()
-		local.SetDeadline(time.Now().Add(8 * time.Minute))
-		remote.SetDeadline(time.Now().Add(8 * time.Minute))
 		fmt.Fprint(buffer, "HTTP/1.1 200 Connection Established\r\n\r\n")
 		buffer.Flush()
 		done := make(chan struct{})

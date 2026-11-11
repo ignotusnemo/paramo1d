@@ -1,0 +1,4 @@
+<animated-vector xmlns:android="http://schemas.android.com/apk/res/android" android:drawable="@drawable/splash_mark">
+    <target android:name="coin_face" android:animation="@animator/coin_face_turn"/>
+    <target android:name="coin_edge" android:animation="@animator/coin_edge_turn"/>
+</animated-vector>

@@ -10,5 +10,6 @@
     "url": "https://services.gradle.org/distributions/gradle-8.14.3-bin.zip",
     "sha256": "bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531"
   },
-  "java": "21"
+  "java": "21",
+  "signing_certificate_sha256": "81ba19578faf5270f224a9c97ac3003c052f8e0c2d1c443561ad1d04053db5fe"
 }

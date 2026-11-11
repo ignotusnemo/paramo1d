@@ -112,6 +112,13 @@ jobs:
           mkdir -p dist
           cp android/app/build/outputs/apk/release/app-release.apk "dist/paramo1d-$GITHUB_REF_NAME-arm64.apk"
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "dist/paramo1d-$GITHUB_REF_NAME-arm64.apk" > dist/SIGNING-CERTIFICATE.txt
+          python3 - <<'PY'
+          import json, pathlib, re
+          expected = json.loads(pathlib.Path('android/build-inputs.json').read_text())['signing_certificate_sha256']
+          certificate = pathlib.Path('dist/SIGNING-CERTIFICATE.txt').read_text()
+          fingerprints = re.findall(r'^Signer #\d+ certificate SHA-256 digest: ([0-9a-f]{64})$', certificate, re.MULTILINE)
+          assert fingerprints == [expected], 'APK signing certificate differs from the official Android release key'
+          PY
       - name: Record APK hashes
         working-directory: dist
         run: sha256sum *.apk > SHA256SUMS

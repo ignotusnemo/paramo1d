@@ -1,0 +1,8 @@
+<resources>
+    <style name="Paramo1dTheme" parent="Paramo1dBaseTheme">
+        <item name="android:windowSplashScreenBackground">@color/app_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_coin</item>
+        <item name="android:windowSplashScreenAnimationDuration">1800</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@android:color/transparent</item>
+    </style>
+</resources>

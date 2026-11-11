@@ -11,6 +11,7 @@ let pollTimer;
 let walletBusy = false;
 const readingChats = new Set();
 let reportedChat;
+let scanNumber = 0, scanContext = null;
 
 function native(op, args = {}) {
   return new Promise((resolve, reject) => {
@@ -77,12 +78,15 @@ async function run(button, work, busyLabel) {
 }
 
 function explainError(message = 'Please try again.') {
+  if (needsNewApproval(message)) return 'This payment expired. Its sender needs to connect, update the wallet and approve a new payment.';
   if (message.startsWith('Insufficient available NOID')) return 'Not enough available NOID. Check pending payments or update your balance.';
   if (message.includes('Connect once') || message.includes('offline view')) return 'Connect to the internet and tap Update balance before making an offline payment.';
   if (message.includes('State advanced') || message.includes('crossed a block boundary') || message.includes('Wallet data is ahead')) return 'The network changed during the check. Update your balance and try again.';
   if (message.startsWith('Invalid recipient')) return 'Check the recipient’s NOID address and try again.';
   return message.replaceAll('Check balance', 'Update balance');
 }
+
+function needsNewApproval(message = '') { return message.includes('BadEpochAnchor') || message.startsWith('Payment epoch changed.'); }
 
 function initials(name) { return String(name || '?').trim().split(/\s+/).slice(0, 2).map((v) => [...v][0]).join('').toUpperCase(); }
 function short(id) { return id ? `${id.slice(0, 8)} · ${id.slice(-8)}` : ''; }
@@ -91,10 +95,7 @@ function contact(id) { return state?.contacts?.find((c) => c.id === id); }
 function chatMessages(key) { return (state?.messages || []).filter((m) => m.chat === key); }
 function preview(message) {
   if (!message) return 'Start the conversation';
-  if (message.type === 'invoice') return `Payment request · ${message.amount} NOID`;
-  if (message.type === 'receipt') return 'Payment receipt';
-  if (message.type === 'transaction') return 'Payment · broadcast help requested';
-  return message.text;
+  return ChatUI.preview(message);
 }
 
 function applyTheme() {
@@ -107,7 +108,7 @@ function render() {
   if (!state?.profile) { $('onboarding').hidden = false; $('toast').hidden = true; return; }
   $('onboarding').hidden = true;
   $('my-name').textContent = state.profile.name;
-  $('my-avatar').textContent = initials(state.profile.name);
+  WarriorAvatar.paint($('my-avatar'), state.profile.id, state.profile.name);
   $('my-fingerprint').textContent = short(state.profile.id);
   renderConnection();
   document.querySelectorAll('[data-tab]').forEach((button) => button.classList.toggle('active', button.dataset.tab === tab));
@@ -128,6 +129,7 @@ function render() {
   renderNearbyPanel();
   renderBackgroundSetting();
   renderSecuritySetting();
+  renderCaptureSetting();
   renderNodeSetting();
   $('wallet-panel').hidden = tab !== 'wallet';
   $('chat-panel').hidden = tab === 'wallet' || !chat;
@@ -162,7 +164,7 @@ function renderConversations() {
     const messages = chatMessages(item.key);
     const last = messages.at(-1);
     const row = element('button', { class: `conversation-row${chat === item.key ? ' selected' : ''}`, onclick: () => openChat(item.key) },
-      element('span', { class: 'avatar' }, item.key.startsWith('g:') ? icon('community') : item.avatar),
+      item.contact ? WarriorAvatar.node(item.contact.id, item.contact.name) : element('span', { class: 'avatar' }, icon('community')),
       element('span', { class: 'row-text' }, element('strong', { text: item.title }), element('p', { text: last ? preview(last.message) : item.description })),
       last ? element('time', { text: time(last.created_ms) }) : null);
     list.append(row);
@@ -177,6 +179,7 @@ function empty(title, description) {
 }
 
 async function openChat(key) {
+  ChatUI.beforeSwitch();
   chat = key;
   tab = key.startsWith('d:') ? 'direct' : 'groups';
   render();
@@ -186,37 +189,7 @@ async function openChat(key) {
 }
 
 function renderChat() {
-  if (!chat || !state) return;
-  const direct = chat.startsWith('d:');
-  const peer = direct ? contact(chat.slice(2)) : null;
-  $('chat-name').textContent = direct ? (peer?.name || 'Contact') : `#${chat.slice(2)}`;
-  $('chat-avatar').replaceChildren(direct ? document.createTextNode(initials(peer?.name)) : icon('community'));
-  $('chat-description').textContent = direct ? 'Private messages' : 'Everyone can read this chat';
-  $('chat-context').textContent = state.storage_full ? 'Storage is full. Open Settings to save a backup or clear local chat history.' : direct ? 'Only you and this contact can decrypt direct messages.' : 'Public community chat. Tap a person to talk directly.';
-  $('payment-button').hidden = !direct;
-  $('attachment-button').hidden = false;
-  $('back-button').hidden = !direct;
-  $('compose-note').textContent = state.connection?.online ? (direct ? 'Private message' : 'Public community message') : (state.nearby?.peers || []).length ? 'Send by Bluetooth. A nearby person can carry it further.' : 'Saved here until you connect to the internet or a nearby phone.';
-  const panel = $('messages');
-  const scroller = $('message-scroll');
-  const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 100;
-  panel.replaceChildren();
-  let day = '';
-  for (const item of chatMessages(chat)) {
-    const thisDay = new Date(item.created_ms).toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' });
-    if (day !== thisDay) { panel.append(element('div', { class: 'date-divider', text: thisDay })); day = thisDay; }
-    const mine = item.sender.id === state.profile.id;
-    const author = element('button', { text: item.sender.name, onclick: () => showContact(item.sender) });
-    const body = element('div', { class: 'message-body' }, element('div', { class: 'message-meta' }, author, element('time', { text: time(item.created_ms) })));
-    if (item.message.type === 'text') body.append(element('div', { class: 'message-text', text: item.message.text }));
-    else body.append(paymentCard(item, mine));
-    if (mine) body.append(element('div', { class: 'message-status', text: item.status === 'sent' ? 'Sent' : item.nearby_delivered ? 'Shared by Bluetooth' : item.status === 'expired' ? 'Not sent · expired' : 'Saved · waiting for a connection' }));
-    else if (item.via_nearby) body.append(element('div', { class: 'message-status', text: 'Received nearby' }));
-    panel.append(element('article', { class: `message${mine ? ' mine' : ''}` }, element('button', { class: 'avatar', text: initials(item.sender.name), onclick: () => showContact(item.sender), 'aria-label': `Open ${item.sender.name}` }), body));
-  }
-  if (!panel.children.length) panel.append(empty(direct ? 'Your conversation starts here.' : `Hello, #${chat.slice(2)}.`, direct ? 'Say hello or send a payment request.' : 'Introduce yourself. Ask a question. Make a connection.'));
-  if (atBottom) requestAnimationFrame(() => { scroller.scrollTop = scroller.scrollHeight; });
-  if (atBottom && Number(state.unread?.[chat]) > 0) queueMicrotask(() => markCurrentRead());
+  ChatUI.render();
 }
 
 async function markCurrentRead(force = false) {
@@ -269,14 +242,17 @@ function transactionCard(item, mine) {
   const latest = reports.slice().sort((a, b) => b.created_ms - a.created_ms)[0];
   const evidence = reports.find((o) => o.message.stage === 'included' && o.message.receipt_hex);
   const verified = (state.receipts || []).find((r) => r.txid === txid && r.verified);
+  const ownPacket = (state.prepared_payments || []).find((p) => p.txid === txid);
+  const outdated = !verified && !evidence && needsNewApproval(item.broadcast_error || ownPacket?.delivery_error || '');
   const card = element('div', { class: `payment-card transaction-card${verified ? ' verified' : ''}`, 'data-txid': txid || '' });
   const title = verified ? (verified.finalized ? 'FINALIZED PAYMENT' : 'PAYMENT CHECKED') : 'PAYMENT';
   card.append(element('header', { text: title }));
   const content = element('div');
   const statuses = { submitted: 'Sent · waiting for confirmation', in_mempool: 'Sent · waiting for confirmation', included: 'Payment found · ready to check', rejected: 'A helper reported rejection' };
-  content.append(element('strong', { class: 'payment-stage', text: verified ? `Block ${Number(verified.height).toLocaleString()}` : statuses[latest?.message.stage] || 'Waiting to reach the network' }));
+  content.append(element('strong', { class: 'payment-stage', text: verified ? `Block ${Number(verified.height).toLocaleString()}` : outdated ? 'Payment expired' : statuses[latest?.message.stage] || 'Waiting to reach the network' }));
   if (txid) content.append(element('code', { text: short(txid) }));
   if (verified) content.append(element('p', { text: 'This phone checked that the payment is included in the blockchain.' }));
+  else if (outdated) content.append(element('p', { class: 'danger', text: mine ? 'Connect, update your wallet and approve a new payment.' : 'Ask the sender to connect, update their wallet and send a new payment.' }));
   else if (latest) content.append(element('p', { class: 'report-meta', text: `${latest.sender.name} · ${time(latest.created_ms)} · network observation` }));
   else content.append(element('p', { text: 'This payment is already approved by its sender. Help it reach the network.' }));
   const helpers = new Set(reports.map((o) => o.sender.id)).size;
@@ -289,10 +265,11 @@ function transactionCard(item, mine) {
     content.append(check);
   }
   if (!verified) {
-    const broadcast = element('button', { class: evidence ? 'outline-button' : 'primary-button', text: 'Help send this payment ↗', onclick: () => inspectBroadcast(item) });
+    if (outdated && mine && ownPacket?.to && !ownPacket.replaced_by) content.append(element('button', { class: 'primary-button', text: 'Review fresh payment ↗', onclick: event => reviewPayment(ownPacket.to, ownPacket.amount, ownPacket.invoice_id || '', event.currentTarget, false, txid) }));
+    const broadcast = element('button', { class: evidence || outdated ? 'outline-button' : 'primary-button', text: outdated ? 'Retry network submission ↗' : 'Help send this payment ↗', onclick: () => inspectBroadcast(item) });
     content.append(broadcast);
   } else content.append(element('button', { class: 'outline-button', text: 'View verified receipt ↗', onclick: () => showReceipt(verified) }));
-  if (mine && item.chat.startsWith('d:')) content.append(element('button', { class: 'text-button', text: 'Ask the community to help', onclick: () => sharePrepared(txid) }));
+  if (mine && !outdated && item.chat.startsWith('d:')) content.append(element('button', { class: 'text-button', text: 'Ask the community to help', onclick: () => sharePrepared(txid) }));
   card.append(content); return card;
 }
 
@@ -321,7 +298,7 @@ function renderWallet() {
   $('balance').textContent = state.chain?.balance || '—';
   const verifying = !!state.chain?.automatic && state.node?.phase === 'verifying';
   const busy = !!state.chain?.running && !state.chain?.automatic || walletBusy || verifying;
-  $('node-status').textContent = busy ? verifying ? 'Verifying wallet changes…' : 'Updating your wallet…' : state.chain?.retrying ? 'Wallet will retry' : state.node?.phase === 'starting' ? 'Connecting your node…' : state.chain?.height ? 'Node connected' : 'Preparing your wallet…';
+  $('node-status').textContent = busy ? verifying ? 'Checking a balance change…' : 'Updating your wallet…' : state.chain?.retrying ? 'Wallet will retry' : state.node?.phase === 'starting' ? 'Connecting…' : state.chain?.height ? state.connection?.online ? 'Wallet ready' : 'Saved balance' : 'Preparing your wallet…';
   $('node-status').classList.toggle('busy', busy);
   $('sync-button').disabled = busy;
   $('sync-button').textContent = busy ? 'Updating…' : 'Update balance';
@@ -333,11 +310,12 @@ function renderWallet() {
   for (const r of state.receipts || []) receipts.append(element('button', { class: 'receipt-row', onclick: () => showReceipt(r) }, element('span', {}, element('strong', { text: r.amount ? `${r.amount} NOID` : 'Verified payment' }), element('small', { text: `Block ${r.height} · ${short(r.txid)}` })), element('span', { text: r.finalized ? 'FINALIZED ↗' : 'VERIFIED ↗' })));
   if (!receipts.children.length) receipts.append(empty('Keep the proof.', 'Verified payment receipts are saved here.'));
   const pendingPayments = $('pending-payments'); pendingPayments.replaceChildren();
-  for (const packet of (state.prepared_payments || []).slice(-20).reverse()) {
+  for (const packet of (state.prepared_payments || []).filter((p) => !p.replaced_by).slice(-20).reverse()) {
     if ((state.receipts || []).some((r) => r.txid === packet.txid && r.verified)) continue;
-    const row = element('div', { class: 'pending-payment' }, element('strong', { text: `${packet.amount || '—'} NOID` }), element('p', { text: packet.submitted ? 'Sent. Waiting for confirmation.' : 'Saved on this phone. Waiting to send.' }), element('code', { text: short(packet.txid) }));
-    if (packet.delivery_error) row.append(element('p', { class: 'danger', text: explainError(packet.delivery_error) }), element('button', { class: 'outline-button', text: 'Try sending again', onclick: (event) => run(event.currentTarget, async () => { state = await native('retry_payment', { txid: packet.txid }); render(); toast('Trying to send the saved payment.'); }) }));
-    row.append(element('button', { class: 'outline-button', text: 'Ask the community to help ↗', onclick: () => sharePrepared(packet.txid) }));
+    const outdated = needsNewApproval(packet.delivery_error);
+    const row = element('div', { class: 'pending-payment' }, element('strong', { text: `${packet.amount || '—'} NOID` }), element('p', { text: packet.submitted ? 'Sent. Waiting for confirmation.' : outdated ? 'Payment expired.' : 'Saved on this phone. Waiting to send.' }), element('code', { text: short(packet.txid) }));
+    if (packet.delivery_error) row.append(element('p', { class: 'danger', text: explainError(packet.delivery_error) }), element('button', { class: 'outline-button', text: outdated ? 'Review fresh payment ↗' : 'Try sending again', onclick: (event) => outdated ? run(null, async () => { if (packet.chat?.startsWith('d:')) await openChat(packet.chat); await reviewPayment(packet.to, packet.amount, packet.invoice_id || '', event.currentTarget, false, packet.txid); }) : run(event.currentTarget, async () => { state = await native('retry_payment', { txid: packet.txid }); render(); toast('Trying to send the saved payment.'); }) }));
+    if (!outdated) row.append(element('button', { class: 'outline-button', text: 'Ask the community to help ↗', onclick: () => sharePrepared(packet.txid) }));
     const evidence = (state.observations || []).find((o) => o.message.txid === packet.txid && o.message.stage === 'included' && o.message.receipt_hex);
     if (evidence) row.append(element('button', { class: 'primary-button', text: 'Check payment ↗', onclick: () => run(null, async () => { const result = await native('receipt_verify', { receipt_hex: evidence.message.receipt_hex, expected_txid: packet.txid }); state = result.state; render(); showReceipt(result.receipt); }) }));
     pendingPayments.append(row);
@@ -359,6 +337,32 @@ function field(label, options = {}) {
   if (options.autocomplete) input.autocomplete = options.autocomplete;
   return { label: element('label', {}, label, input), input };
 }
+
+function scannedField(kind, value, preview) {
+  const button = element('button', { class: 'scan-trigger', type: 'button', 'aria-label': kind === 'contact' ? 'Scan a contact QR code' : 'Scan a NOID address', onclick: async () => {
+    if (scanContext) return;
+    const scan = { id: String(++scanNumber), kind, input: value.input, button, preview };
+    scanContext = scan; button.disabled = true;
+    try { await native('scan_qr', { kind, scan_id: scan.id }); }
+    catch (error) { if (scanContext === scan) scanContext = null; button.disabled = false; toast(explainError(error.message)); }
+  } }, icon('scan'), 'Scan');
+  return element('div', { class: 'scan-field' }, value.label, button);
+}
+
+window.paramo1dScanResult = result => {
+  const scan = scanContext;
+  if (!scan || result.scan_id !== scan.id) return;
+  scanContext = null; scan.button.disabled = false;
+  if (result.cancelled || !scan.input.isConnected || !$('modal').open) return;
+  if (result.error) { toast(explainError(result.error)); return; }
+  if (result.kind !== scan.kind || typeof result.text !== 'string') { toast('Please scan the QR code again.'); return; }
+  scan.input.value = result.text; scan.input.dispatchEvent(new Event('input', { bubbles: true }));
+  if (scan.preview && result.contact) {
+    scan.preview.replaceChildren(WarriorAvatar.node(result.contact.id, result.contact.name), element('span', {}, element('strong', { text: result.contact.name }), element('small', { text: short(result.contact.id) })));
+    scan.preview.hidden = false;
+  }
+  toast(scan.kind === 'contact' ? 'Contact scanned. Tap Add contact to save it.' : 'Address scanned. Check the recipient before sending.');
+};
 
 function showContact(peer) {
   if (peer.id === state.profile.id) { showInvite(); return; }
@@ -384,10 +388,12 @@ function showInvite() {
 
 function showAddContact() {
   const uri = field('Contact link', { multiline: true, placeholder: 'paramo1d://contact/…' });
+  const preview = element('div', { class: 'scanned-contact contact-card-person', hidden: '' });
+  uri.input.addEventListener('input', () => { preview.hidden = true; });
   const add = element('button', { class: 'primary-button', text: 'Add contact ↗', onclick: () => run(add, async () => {
     state = await native('import_contact', { uri: uri.input.value.trim() }); $('modal').close(); render();
   }) });
-  modal('Add a contact', [element('p', { text: 'Ask someone to share their Paramo1d contact link, then paste it here.' }), uri.label, add], 'MESSAGES');
+  modal('Add a contact', [element('p', { text: 'Scan their contact QR code or paste their Paramo1d contact link.' }), scannedField('contact', uri, preview), preview, add], 'MESSAGES');
 }
 
 function showSettings() {
@@ -400,12 +406,13 @@ function showSettings() {
   const save = element('button', { class: 'primary-button', text: 'Save connection settings ↗', onclick: () => run(save, async () => {
     state = await native('settings', { relays: relays.input.value.split('\n').map((s) => s.trim()).filter(Boolean), rpc: rpc.input.value.trim() }); $('modal').close(); render(); await poll();
   }) });
-  modal('Settings', [appearance, element('button', { class: 'outline-button', text: 'Connections', onclick: showConnections }), element('div', { id: 'node-setting' }), element('div', { id: 'background-setting' }), element('div', { id: 'security-setting' }),
+  modal('Settings', [appearance, element('button', { class: 'outline-button', text: 'Connections', onclick: showConnections }), element('div', { id: 'node-setting' }), element('div', { id: 'background-setting' }), element('div', { id: 'security-setting' }), element('div', { id: 'capture-setting' }),
     element('button', { class: 'outline-button', text: 'Save an encrypted backup ↗', onclick: showBackup }),
     element('details', { class: 'advanced-settings' }, element('summary', { text: 'Advanced settings' }), element('p', { text: 'Choose your delivery relays and wallet data service.' }), relays.label, rpc.label, save, element('button', { class: 'outline-button', text: 'Import a payment receipt', onclick: showImportReceipt }), element('button', { class: 'outline-button', text: 'Clear local chat history', onclick: showClearHistory }), element('p', { text: 'Direct-message encryption: X25519 and XSalsa20-Poly1305. The community chat and NOID payments are public.' }))], 'SETTINGS');
   if (state.storage_full) $('modal-content').prepend(element('section', { class: 'wallet-reminder' }, element('strong', { text: 'Storage is full' }), element('p', { text: 'Save a backup, then clear local chat history to receive more messages.' }), element('button', { class: 'outline-button', text: 'Clear local chat history', onclick: showClearHistory })));
   renderBackgroundSetting();
   renderSecuritySetting();
+  renderCaptureSetting();
   renderNodeSetting();
 }
 
@@ -433,6 +440,12 @@ function renderSecuritySetting() {
 function connectionToggle(label, on, action) {
   const button = element('button', { class: 'connection-toggle', role: 'switch', 'aria-label': label, 'aria-checked': String(on), onclick: () => run(button, action) }, element('span', { text: on ? 'On' : 'Off' }), element('span', { class: 'toggle-track', 'aria-hidden': 'true' }));
   return button;
+}
+function renderCaptureSetting() {
+  const panel = $('capture-setting'); if (!panel) return;
+  const enabled = !!state.allow_screenshots;
+  const toggle = connectionToggle('Allow screenshots', enabled, async () => { state = await native('allow_screenshots', { enabled: !enabled }); render(); });
+  panel.replaceChildren(element('section', { class: 'connection-card' }, element('div', { class: 'connection-card-heading' }, element('strong', { text: 'Allow screenshots' }), toggle), element('p', { text: 'Save screenshots or record the app screen on this phone. Off by default.' })));
 }
 function renderBackgroundSetting() {
   const panel = $('background-setting'); if (!panel) return;
@@ -525,7 +538,7 @@ function showActions() {
 }
 
 function showBroadcastHelp() {
-  const payments = (state.prepared_payments || []).filter(p => !(state.receipts || []).some(r => r.verified && r.txid === p.txid));
+  const payments = (state.prepared_payments || []).filter(p => !p.replaced_by && !needsNewApproval(p.delivery_error) && !(state.receipts || []).some(r => r.verified && r.txid === p.txid));
   const items = [element('p', { text: 'Choose a saved payment. Someone with internet can help send it to the network.' })];
   for (const payment of payments.slice(-20).reverse()) items.push(element('button', { class: 'saved-payment-choice', onclick: () => sharePrepared(payment.txid) }, element('strong', { text: `${payment.amount} NOID` }), element('small', { text: `To ${short(payment.to)} · fee ${payment.fee} NOID` }), element('span', { text: 'Ask the community to help' })));
   if (!payments.length) items.push(element('p', { text: 'No payments waiting to send.' }), element('button', { class: 'primary-button', text: 'Open wallet', onclick: () => { $('modal').close(); selectTab('wallet'); } }));
@@ -540,15 +553,15 @@ function showSend() {
   const address = field('Recipient NOID address', { value: peer?.address || '', placeholder: 'o1…' });
   const amount = field('Amount · NOID', { placeholder: '0.00' }); amount.input.inputMode = 'decimal';
   const button = element('button', { class: 'primary-button', text: 'Review payment ↗', onclick: () => reviewPayment(address.input.value.trim(), amount.input.value, '', button) });
-  modal('Send NOID.', [address.label, amount.label, element('p', { text: state.connection?.online ? 'Review the amount and fee before sending.' : 'Use the balance last checked on this phone. A nearby person can carry your payment to the network.' }), button], 'NOID / SEND');
+  modal('Send NOID.', [scannedField('address', address), amount.label, element('p', { text: state.connection?.online ? 'Review the amount and fee before sending.' : 'Use the balance last checked on this phone. A nearby person can carry your payment to the network.' }), button], 'NOID / SEND');
 }
 
-async function reviewPayment(address, amount, invoiceId, button, useCached = !!state?.chain?.height || !state?.connection?.online) {
+async function reviewPayment(address, amount, invoiceId, button, useCached = !!state?.chain?.height || !state?.connection?.online, replacesTxid = '') {
   await run(button, async () => {
     amount = paymentAmount(amount);
     if (!address) throw new Error('Enter the recipient’s NOID address.');
     toast(useCached ? 'Preparing from your saved balance…' : 'Updating your wallet and preparing the payment…');
-    const review = await native('payment_preview', { address, amount, invoice_id: invoiceId, chat: chat?.startsWith('d:') ? chat : '', use_cached: useCached });
+    const review = await native('payment_preview', { address, amount, invoice_id: invoiceId, chat: chat?.startsWith('d:') ? chat : '', use_cached: useCached, replaces_txid: replacesTxid });
     const rows = [['To', review.to], ['Amount', `${review.amount} NOID`], ['Network fee', `${review.fee} NOID`], ['Total', `${review.total} NOID`]]
       .map(([key, value]) => element('div', { class: 'review-row' }, element('span', { text: key }), element('span', { text: value })));
     const approve = element('button', { class: 'primary-button', text: 'Send payment ↗', onclick: () => run(approve, async () => {
@@ -556,7 +569,9 @@ async function reviewPayment(address, amount, invoiceId, button, useCached = !!s
       const help = element('button', { class: 'primary-button', text: 'Ask the community to help ↗', onclick: () => sharePrepared(sent.txid) });
       modal(sent.submitted ? 'Payment sent' : sent.delivery_queued ? 'Sending your payment' : 'Payment saved on this phone', [element('p', { text: sent.submitted ? 'Waiting for confirmation. Follow the payment in your wallet or chat.' : sent.delivery_queued ? 'Your payment is saved and is being sent to the network. Follow its status in your wallet or chat.' : 'It will need to reach the network to confirm. Ask the community to help send it.' }), element('button', { class: 'primary-button', text: 'View in wallet', onclick: () => { $('modal').close(); selectTab('wallet'); } }), help, element('details', { class: 'advanced-settings' }, element('summary', { text: 'Payment details' }), element('div', { class: 'detail', text: sent.txid }))], 'PAYMENT');
     }, 'Sending…') });
-    modal('Check your payment.', [...rows, element('p', { text: review.using_saved_state ? 'Using the balance last checked on this phone. The payment will confirm after reaching the network.' : 'Check the recipient, amount and fee before sending.' }), approve], 'AUTHORIZE');
+    const validity = element('p', { text: 'Send it soon. If the payment expires before reaching the network, you will need to approve a new one.' });
+    if (review.valid_through_height) validity.append(element('details', { class: 'payment-validity-details' }, element('summary', { text: 'Payment timing' }), element('small', { text: `The network can accept this payment through block ${Number(review.valid_through_height).toLocaleString()}.` })));
+    modal('Check your payment.', [...rows, element('p', { text: review.using_saved_state ? 'Using the balance last checked on this phone.' : 'Check the recipient, amount and fee before sending.' }), validity, approve], 'AUTHORIZE');
   }, 'Preparing…');
 }
 
@@ -608,22 +623,20 @@ async function poll() {
 }
 window.paramo1dBack = () => {
   if ($('modal').open) { $('modal').close(); return true; }
-  if (chat?.startsWith('d:')) { chat = null; render(); return true; }
+  if (ChatUI.back()) return true;
+  if (chat?.startsWith('d:')) { ChatUI.beforeSwitch(); chat = null; render(); return true; }
   if (tab !== 'groups') { selectTab('groups'); return true; }
   return false;
 };
-function selectTab(value) { tab = value; chat = value === 'groups' ? 'g:parano1d' : null; $('search').value = ''; render(); }
+function selectTab(value) { ChatUI.beforeSwitch(); tab = value; chat = value === 'groups' ? 'g:parano1d' : null; $('search').value = ''; render(); }
 
 $('create-identity-form').addEventListener('submit', (event) => { event.preventDefault(); run(event.submitter, async () => { state = await native('create_identity', { name: $('display-name').value.trim() }); render(); await poll(); }); });
-$('compose-form').addEventListener('submit', (event) => { event.preventDefault(); const text = $('compose').value.trim(); if (!text || !chat) return; run(event.submitter, async () => {
-  state = await native('send', { chat, message: { type: 'text', text } }); $('compose').value = ''; $('compose').rows = 1; render(); $('message-scroll').scrollTop = $('message-scroll').scrollHeight;
-}); });
-$('compose').addEventListener('input', () => { $('compose').rows = Math.min(5, $('compose').value.split('\n').length); });
+ChatUI.setup();
 $('compose').addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && matchMedia('(min-width:761px)').matches) { event.preventDefault(); $('compose-form').requestSubmit(); } });
 document.querySelectorAll('[data-tab]').forEach((button) => button.addEventListener('click', () => selectTab(button.dataset.tab)));
 $('search').addEventListener('input', renderConversations);
 $('home-button').addEventListener('click', () => selectTab('groups'));
-$('back-button').addEventListener('click', () => { chat = null; render(); });
+$('back-button').addEventListener('click', () => { ChatUI.beforeSwitch(); chat = null; render(); });
 $('new-button').addEventListener('click', showAddContact);
 $('settings-button').addEventListener('click', () => state?.profile ? showSettings() : toast('Create or restore your identity first.'));
 $('connection').addEventListener('click', () => state?.profile ? showConnections() : toast('Create or restore your identity first.'));
@@ -661,6 +674,8 @@ window.paramo1dOpenContact = (uri) => run(null, async () => { state = await nati
 window.paramo1dOpenChat = (key) => { if (/^d:[0-9a-f]{64}$/.test(key)) { $('modal').close(); return openChat(key); } };
 
 (async () => {
-  try { state = await native('boot'); render(); await poll(); pollTimer = setInterval(poll, 10000); }
+  try { state = await native('boot'); render(); }
   catch (error) { $('onboarding').hidden = false; if (window.Paramo1d) toast(error.message); }
+  finally { window.Paramo1d?.ready?.(); }
+  await poll(); pollTimer = setInterval(poll, 10000);
 })();

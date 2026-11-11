@@ -34,6 +34,11 @@ async function bridge(page) {
       if (request.op === 'theme') state.settings.theme = request.value;
       if (request.op === 'create_identity') state.profile = { ...alice, name: request.name };
       if (request.op === 'app_lock') state.security.enabled = request.enabled;
+      if (request.op === 'allow_screenshots') state.allow_screenshots = request.enabled;
+      if (request.op === 'scan_qr') {
+        result = { opening: true };
+        if (window.testScanResult) queueMicrotask(() => window.paramo1dScanResult({ ...window.testScanResult, scan_id: request.scan_id }));
+      }
       if (request.op === 'paranoid_mode') state.paranoid_mode=request.enabled;
       if (request.op === 'mark_read') { state.unread = state.unread || {}; state.unread[request.chat] = 0; }
       if (request.op === 'protection_enable') { state.protection = { enabled: true, connected: true }; state.background_delivery = true; }
@@ -43,18 +48,39 @@ async function bridge(page) {
       if (request.op === 'background_enable') state.background_delivery = true;
       if (request.op === 'background_disable') state.background_delivery = false;
       if (request.op === 'send') state.messages.push({ id: 'sent-' + window.testCalls.length, chat: request.chat, sender: alice, message: request.message, created_ms: Date.now(), status: 'queued' });
+      if (request.op === 'save_draft') {
+        state.drafts ||= {};
+        if (request.text || request.reply_to) state.drafts[request.chat] = { text: request.text, reply_to: request.reply_to };
+        else delete state.drafts[request.chat];
+        result = { saved: true };
+      }
+      if (request.op === 'preview_contact') {
+        const contact = window.testContactLinks?.[request.uri];
+        if (!contact) { queueMicrotask(() => window.paramo1dReply(id, { ok: false, error: 'Invalid contact signature' })); return; }
+        result = { contact };
+      }
+      if (request.op === 'import_contact') {
+        const contact = window.testContactLinks?.[request.uri];
+        if (contact && !state.contacts.some(c => c.id === contact.id)) state.contacts.push(contact);
+      }
+      if (request.op === 'broadcast_preview') result = { txid: request.txid || window.testBroadcastTxid || txid, outputs: [{ address: bob.address, amount_micronoid: '10000' }], fee: '0.009000' };
+      if (request.op === 'broadcast_send' && window.testBroadcastError) {
+        const message = state.messages.find(m => m.id === request.message_id);
+        if (message) message.broadcast_error = window.testBroadcastError;
+        queueMicrotask(() => { window.paramo1dUpdate(JSON.parse(JSON.stringify(state))); window.paramo1dReply(id, { ok: false, error: window.testBroadcastError }); }); return;
+      }
       if (request.op === 'receipt_verify') {
         const receipt = { verified: true, txid, height: 300000, confirmations: 4, finalized: false, message_id: request.message_id };
         state.receipts.push(receipt); result = { state, receipt };
       }
-      if (request.op === 'payment_preview') result = { review_id: 'review-fixture', to: request.address, amount: request.amount, fee: '0.010000', total: '2.510000', height: 300000, using_saved_state: request.use_cached };
+      if (request.op === 'payment_preview') result = { review_id: 'review-fixture', to: request.address, amount: request.amount, fee: '0.010000', total: '2.510000', height: 300000, valid_through_height: 300096, using_saved_state: request.use_cached };
       if (request.op === 'payment_send') result = { state, txid, submitted: false };
       queueMicrotask(() => window.paramo1dReply(id, { ok: true, result: JSON.parse(JSON.stringify(result)) }));
     } };
   });
 }
 
-(async () => {
+async function main() {
   await fs.mkdir(output, { recursive: true });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const browser = await chromium.launch({ executablePath: process.env.CHROME || '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox'] });
@@ -112,7 +138,7 @@ async function bridge(page) {
     await page.evaluate(async () => { window.testState.messages[0].message.text = '<img src=x onerror="window.injected=true">'; await poll(); });
     await page.locator('.mobile-tabs [data-tab="groups"]').click();
     await page.locator('#messages').getByText('<img src=x onerror="window.injected=true">', { exact: true }).waitFor();
-    assert.equal(await page.evaluate(() => window.injected), undefined); assert.equal(await page.locator('#messages img').count(), 0);
+    assert.equal(await page.evaluate(() => window.injected), undefined); assert.equal(await page.locator('#messages .message-text img').count(), 0);
     await page.evaluate(async () => { window.testState.messages[0].message.text = 'Good morning, everyone. Who is building today?'; await poll(); });
     await page.setViewportSize({ width: 1280, height: 900 }); await page.locator('.desktop-tabs [data-tab="groups"]').click();
     await page.screenshot({ path: path.join(output, 'community-desktop.png') });
@@ -206,10 +232,10 @@ async function bridge(page) {
     await page.locator('#close-modal').click();
     await page.locator('.mobile-tabs [data-tab="wallet"]').click();
     await page.evaluate(()=>{testState.chain={height:100,balance:'1.000000',running:true,automatic:true};testState.node={phase:'following'};paramo1dUpdate(JSON.parse(JSON.stringify(testState)));});
-    assert.equal(await page.locator('#node-status').innerText(),'Node connected');
+    assert.equal(await page.locator('#node-status').innerText(),'Saved balance');
     assert.equal(await page.locator('#sync-button').isDisabled(),false);
     await page.evaluate(()=>{testState.node={phase:'verifying'};paramo1dUpdate(JSON.parse(JSON.stringify(testState)));});
-    assert.equal(await page.locator('#node-status').innerText(),'Verifying wallet changes…');
+    assert.equal(await page.locator('#node-status').innerText(),'Checking a balance change…');
     assert.equal(await page.locator('#balance').innerText(),'1.000000');
     await page.setViewportSize({width:1280,height:800});
     await page.evaluate(()=>{testState.settings.theme='dark';paramo1dUpdate(JSON.parse(JSON.stringify(testState)));selectTab('direct');});
@@ -242,4 +268,7 @@ async function bridge(page) {
 
     assert.deepEqual(errors, []); console.log('PASS: mobile layout, local receipt status, queued delivery, payment review, unsent packet handling, unknown balance and safe message text.');
   } finally { await browser.close(); server.close(); }
-})().catch((error) => { console.error(error); process.exitCode = 1; server.close(); });
+}
+
+module.exports = { bridge, server, output };
+if (require.main === module) main().catch((error) => { console.error(error); process.exitCode = 1; server.close(); });

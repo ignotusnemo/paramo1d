@@ -17,6 +17,7 @@ import (
 	"github.com/amnezia-vpn/amneziawg-go/v3/tun"
 	"github.com/gorilla/websocket"
 	"github.com/ignotusnemo/paramo1d/tunnel/client"
+	"github.com/ignotusnemo/paramo1d/tunnel/internal/idleconn"
 	"github.com/ignotusnemo/paramo1d/tunnel/internal/wsstream"
 	"io"
 	"net"
@@ -187,6 +188,7 @@ func (r *Relay) websocket(w http.ResponseWriter, q *http.Request) {
 		http.Error(w, "Destination unavailable", 502)
 		return
 	}
+	remote = idleconn.New(remote, 8*time.Minute)
 	defer remote.Close()
 	upgrade := websocket.Upgrader{ReadBufferSize: 32768, WriteBufferSize: 32768, CheckOrigin: func(q *http.Request) bool { return q.Header.Get("Origin") == "" }}
 	socket, e := upgrade.Upgrade(w, q, nil)
@@ -195,8 +197,6 @@ func (r *Relay) websocket(w http.ResponseWriter, q *http.Request) {
 	}
 	local := wsstream.New(socket)
 	defer local.Close()
-	local.SetDeadline(time.Now().Add(8 * time.Minute))
-	remote.SetDeadline(time.Now().Add(8 * time.Minute))
 	done := make(chan struct{})
 	go func() { io.Copy(remote, local); remote.Close(); close(done) }()
 	io.Copy(local, remote)
@@ -248,14 +248,13 @@ func (r *Relay) proxy(w http.ResponseWriter, q *http.Request) {
 		http.Error(w, "Destination unavailable", 502)
 		return
 	}
+	remote = idleconn.New(remote, 8*time.Minute)
 	defer remote.Close()
 	local, buffer, e := w.(http.Hijacker).Hijack()
 	if e != nil {
 		return
 	}
 	defer local.Close()
-	local.SetDeadline(time.Now().Add(8 * time.Minute))
-	remote.SetDeadline(time.Now().Add(8 * time.Minute))
 	fmt.Fprint(buffer, "HTTP/1.1 200 Connection Established\r\n\r\n")
 	buffer.Flush()
 	done := make(chan struct{})

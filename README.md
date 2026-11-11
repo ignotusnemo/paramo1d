@@ -4,6 +4,8 @@
 
 Send, receive and request NOID directly inside a chat. Your phone holds the spending secret, authorizes payments and verifies the blockchain. Connect through ordinary internet, turn on the built-in protected connection, or exchange messages and authorized payments with nearby participants over Bluetooth.
 
+Reply to messages, react with emoji, copy text and share contact cards. Each conversation keeps its own encrypted draft. Pixel warrior avatars are generated on the device from each messaging identity.
+
 ## Inside the app
 
 - **A blockchain node on your phone.** Connect directly to mainnet peers and independently verify the chain, recursive State proofs and payment receipts.

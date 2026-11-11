@@ -21,7 +21,9 @@ final class AppLock {
     private final Activity activity;
     private Runnable approved, cancelled;
     private CancellationSignal signal;
+    private BiometricPrompt prompt;
     private boolean authenticating;
+    private long attempt, startedAt;
 
     AppLock(Activity activity) { this.activity = activity; }
     static boolean available(Context context) { return context.getSystemService(KeyguardManager.class).isDeviceSecure(); }
@@ -48,34 +50,56 @@ final class AppLock {
     void lock() { open = false; }
     boolean authenticating() { return authenticating; }
     void authenticate(Runnable success, Runnable cancel) {
-        if (authenticating) return;
+        if (authenticating) {
+            if (!activity.hasWindowFocus() || SystemClock.elapsedRealtime() - startedAt < 1000) return;
+            cancelAuthentication();
+        }
         if (!available(activity)) { cancel.run(); return; }
-        approved = success; cancelled = cancel; authenticating = true;
-        if (Build.VERSION.SDK_INT >= 29) {
-            BiometricPrompt.Builder builder = new BiometricPrompt.Builder(activity)
-                .setTitle("Unlock Paramo1d")
-                .setSubtitle("Use your fingerprint or phone PIN");
-            if (Build.VERSION.SDK_INT >= 30) builder.setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG | BiometricManager.Authenticators.DEVICE_CREDENTIAL);
-            else builder.setDeviceCredentialAllowed(true);
-            signal = new CancellationSignal();
-            builder.build().authenticate(signal, activity.getMainExecutor(), new BiometricPrompt.AuthenticationCallback() {
-                @Override public void onAuthenticationSucceeded(BiometricPrompt.AuthenticationResult result) { complete(true); }
-                @Override public void onAuthenticationError(int code, CharSequence text) { complete(false); }
-            });
-        } else {
-            Intent intent = activity.getSystemService(KeyguardManager.class).createConfirmDeviceCredentialIntent("Unlock Paramo1d", "Use your phone screen lock");
-            if (intent == null) complete(false); else activity.startActivityForResult(intent, CREDENTIAL_REQUEST);
+        approved = success; cancelled = cancel; authenticating = true; startedAt = SystemClock.elapsedRealtime();
+        final long current = ++attempt;
+        android.util.Log.i("Paramo1dUnlock", "Authentication requested with focused window=" + activity.hasWindowFocus());
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                BiometricPrompt.Builder builder = new BiometricPrompt.Builder(activity)
+                    .setTitle("Unlock Paramo1d")
+                    .setSubtitle("Use your fingerprint or phone PIN");
+                if (Build.VERSION.SDK_INT >= 30) builder.setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG | BiometricManager.Authenticators.DEVICE_CREDENTIAL);
+                else builder.setDeviceCredentialAllowed(true);
+                signal = new CancellationSignal();
+                prompt = builder.build();
+                prompt.authenticate(signal, activity.getMainExecutor(), new BiometricPrompt.AuthenticationCallback() {
+                    @Override public void onAuthenticationSucceeded(BiometricPrompt.AuthenticationResult result) { complete(current, true); }
+                    @Override public void onAuthenticationError(int code, CharSequence text) {
+                        android.util.Log.i("Paramo1dUnlock", "Authentication ended with code=" + code);
+                        complete(current, false);
+                    }
+                });
+            } else {
+                Intent intent = activity.getSystemService(KeyguardManager.class).createConfirmDeviceCredentialIntent("Unlock Paramo1d", "Use your phone screen lock");
+                if (intent == null) complete(current, false); else activity.startActivityForResult(intent, CREDENTIAL_REQUEST);
+            }
+        } catch (RuntimeException unavailable) {
+            android.util.Log.w("Paramo1dUnlock", "Authentication could not start");
+            complete(current, false);
         }
     }
     boolean activityResult(int request, int result) {
         if (request != CREDENTIAL_REQUEST) return false;
-        complete(result == Activity.RESULT_OK); return true;
+        if (authenticating && signal == null) complete(attempt, result == Activity.RESULT_OK);
+        return true;
     }
-    private void complete(boolean success) {
+    private void complete(long current, boolean success) {
+        if (current != attempt || !authenticating) return;
         Runnable callback = success ? approved : cancelled;
-        authenticating = false; approved = null; cancelled = null; signal = null;
+        authenticating = false; approved = null; cancelled = null; signal = null; prompt = null;
+        android.util.Log.i("Paramo1dUnlock", success ? "Authentication accepted" : "Authentication cancelled");
         if (success) opened();
         if (callback != null && !activity.isDestroyed()) callback.run();
     }
-    void destroy() { approved = null; cancelled = null; if (signal != null) signal.cancel(); }
+    private void cancelAuthentication() {
+        CancellationSignal pending = signal;
+        ++attempt; authenticating = false; approved = null; cancelled = null; signal = null; prompt = null;
+        if (pending != null) { android.util.Log.i("Paramo1dUnlock", "Cancelling pending authentication"); pending.cancel(); }
+    }
+    void destroy() { cancelAuthentication(); }
 }

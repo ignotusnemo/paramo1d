@@ -1,1 +1,5 @@
-<resources><color name="launcher_background">#171D2A</color></resources>
+<resources>
+    <color name="launcher_background">#171D2A</color>
+    <color name="app_background">#F6F6EE</color>
+    <color name="zxing_viewfinder_laser">#00FF80</color>
+</resources>

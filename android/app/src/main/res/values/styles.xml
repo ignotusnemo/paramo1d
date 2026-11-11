@@ -1,0 +1,12 @@
+<resources>
+    <style name="Paramo1dBaseTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/app_background</item>
+        <item name="android:colorAccent">#00FF80</item>
+        <item name="android:fontFamily">sans</item>
+    </style>
+    <style name="Paramo1dTheme" parent="Paramo1dBaseTheme"/>
+    <style name="Paramo1dScanTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#101413</item>
+        <item name="android:colorAccent">#00FF80</item>
+    </style>
+</resources>

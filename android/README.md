@@ -6,6 +6,18 @@ The wallet prepares and authorizes payments on the device. A connected participa
 
 The application uses the existing mainnet transaction format, Owner authorization and recursive State verifier. The consensus source and release pins remain in `vendor/` and `profiles/mainnet.json`.
 
+## Conversations
+
+Tap the three dots beside a message or hold its bubble to reply, copy text, select text or add a reaction. Tapping a quoted reply takes you to the original message saved on the phone. The smile button opens the emoji picker. Search in the conversation header finds messages and author names.
+
+Each conversation keeps its own draft in the encrypted local archive. Reading earlier messages preserves the scroll position when new messages arrive. The down arrow returns to the latest messages. History loads in bounded windows.
+
+**Add contact** includes a Scan button for contact QR codes. Scanning checks the signed contact and shows its name before **Add contact** saves it. **Send NOID** also has a Scan button beside the recipient field. It reads a receiving QR code, checks the address checksum and fills the recipient. The amount and fee are reviewed separately.
+
+Pasting a Paramo1d contact link creates a contact card. The phone checks its signature before showing the identity and Add contact or Message actions. Copy link preserves the original contact link. Pixel warrior avatars are generated locally from each messaging identity and appear consistently in the conversation list, messages and contact cards.
+
+Replies and reactions use readable, signed text inside the existing message envelope. The same envelopes travel through internet delivery and Bluetooth. Both conversation participants can update their application independently.
+
 ## Payment delivery
 
 1. Open a direct conversation to request or send NOID.
@@ -19,6 +31,8 @@ The card distinguishes ready-to-relay packets, node submission, reported mempool
 Offline preparation uses the saved, verified State bundle and slot proofs. The saved view must contain spendable inputs and empty output slots. Inputs and output slots used in pending authorizations are reserved locally. Spent inputs or an expired epoch anchor require a new review and authorization.
 
 The client saves its verified wallet view with a local authentication tag. The tag binds the verified tip, the slot-proof header, the transaction epoch header, the account and the pinned verification profile. Its key is derived from the protected wallet identity with a separate domain. A saved view is created after State and slot-proof verification. Reopening checks its tag and slot membership proofs before reuse. A missing or invalid tag requires full verification. Online payment review also checks the observed chain height and refreshes the verified view when the transaction epoch changes.
+
+Authorization rechecks the reviewed payment against the authenticated wallet checkpoint. An online authorization checks the observed height again. When the network rejects an expired authorization, its card shows **Payment expired**. The sender can select **Review fresh payment** to update the wallet and review a replacement. A helper is asked to contact the sender. An inclusion receipt can still establish that an earlier payment already reached the chain.
 
 Full proof verification authenticates its parameters and preserves accepted chainwork and finality. The worker retains immutable matrix data in a bounded cache to avoid repeated decoding and authentication. The canonical matrix byte budget is 640 MiB while the app is open and 192 MiB after it is minimized. Android memory-pressure callbacks release the cache. A saved proof result can be reused in the running process only with the same bundle path and a fresh SHA-512 fingerprint of its consumed files. On a fresh synchronization after restart, the client checks the saved header prefix and verifies a newer recursive proof directly.
 
@@ -36,6 +50,8 @@ Read acknowledgements follow the visible conversation. Wallet and Settings scree
 
 The protected connection uses an application-owned AmneziaWG stack and an authenticated HTTPS WebSocket fallback. Only Paramo1d sockets use it. HTTPS certificates and hostnames are verified. The production gateway permits the chat service and mainnet seed connections. If the phone already has a working VPN, leave App VPN off. Otherwise, App VPN provides a connection option within Paramo1d.
 
+Successful reads and writes renew the protected stream's idle timeout. Active chat and node connections can continue across the timeout interval.
+
 Bluetooth links authenticate both contact cards and fresh session challenges, then encrypt frames. A device can retain an envelope addressed to another contact and carry it without decrypting its contents. Nearby exchange keeps at most two active links and a bounded inventory. A received payment packet is locally checked with the native Owner verifier before it appears as authorized. Its inclusion receipt is checked separately against the phone's verified chain.
 
 The wallet uses adaptive updates while the application is open and unlocked. Small queries watch its coin set and retain peer connections. A change in amount, slot or incarnation triggers independent verification of the latest State and the relevant slot proofs. Unchanged hints retain the last verified balance and its original check time. **Update balance** requests a full check immediately. A new wallet starts its initial check when the Wallet screen is opened.
@@ -47,6 +63,8 @@ The wallet's chain data endpoint supplies slot discovery, membership proofs and 
 ## Identity and storage
 
 **App lock** uses the phone's existing fingerprint or screen lock at entry. It is enabled by default when the device has a screen lock. The app locks after 30 seconds away or immediately through **Lock now** in Settings. An unlocked session covers chats, payment review and backup export. Sending a payment uses the ordinary recipient, amount and fee review. The backup password encrypts the portable file and is used to restore it on another device.
+
+**Allow screenshots** in Settings permits screenshots and screen recordings on this phone. It is off by default. Camera access is requested when opening the QR scanner. Scanning runs locally with ZXing and closes the camera when leaving the scanner. The scanner's license notices are bundled in `SCANNER-NOTICES.txt`.
 
 An identity begins with 32 random bytes generated on the device. Domain-separated derivation supplies the existing NOID spending secret and separate messaging keys. Direct envelopes use X25519 and XSalsa20-Poly1305. Ed25519 authenticates message envelopes, contact cards and mailbox reads. Contact links can be shared as QR codes. Delivery services observe routing metadata. The community chat and on-chain NOID payments are public.
 
