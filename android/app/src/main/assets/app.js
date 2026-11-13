@@ -38,6 +38,10 @@ window.paramo1dReply = (id, response) => {
   else call.reject(new Error(response.error || 'The operation could not be completed.'));
 };
 window.paramo1dUpdate = (updated) => { state = updated; render(); };
+window.paramo1dKeyboard = (visible) => {
+  document.body.classList.toggle('keyboard-open', !!visible);
+  ChatUI.layoutChanged();
+};
 
 function element(tag, attributes = {}, ...children) {
   const node = document.createElement(tag);
@@ -73,7 +77,7 @@ async function run(button, work, busyLabel) {
   if (button?.disabled) return;
   const original = button?.innerHTML;
   if (button) { button.disabled = true; if (busyLabel) button.textContent = busyLabel; }
-  try { return await work(); } catch (error) { toast(explainError(error.message)); }
+  try { return await work(); } catch (error) { if (ChatStorageUI.isFullError(error.message)) ChatStorageUI.reportFull(); else toast(explainError(error.message)); }
   finally { if (button) { button.disabled = false; if (busyLabel) button.innerHTML = original; } }
 }
 
@@ -111,6 +115,7 @@ function render() {
   WarriorAvatar.paint($('my-avatar'), state.profile.id, state.profile.name);
   $('my-fingerprint').textContent = short(state.profile.id);
   renderConnection();
+  ChatStorageUI.renderNotice();
   document.querySelectorAll('[data-tab]').forEach((button) => button.classList.toggle('active', button.dataset.tab === tab));
   const unreadDirect = Object.entries(state.unread || {}).filter(([key]) => key.startsWith('d:')).reduce((sum, [, count]) => sum + Number(count), 0);
   document.querySelectorAll('[data-tab="direct"]').forEach(button => {
@@ -167,7 +172,10 @@ function renderConversations() {
       item.contact ? WarriorAvatar.node(item.contact.id, item.contact.name) : element('span', { class: 'avatar' }, icon('community')),
       element('span', { class: 'row-text' }, element('strong', { text: item.title }), element('p', { text: last ? preview(last.message) : item.description })),
       last ? element('time', { text: time(last.created_ms) }) : null);
-    list.append(row);
+    if (item.contact) list.append(element('div', { class: 'conversation-item' }, row,
+      element('button', { class: 'icon-button conversation-options', 'aria-label': `Options for ${item.title}`, onclick: () => showChatOptions(item.key) }, icon('more'))));
+    else list.append(row);
+    row.addEventListener('contextmenu', event => { event.preventDefault(); showChatOptions(item.key); });
     const count = Number(state.unread?.[item.key] || 0);
     if (count) row.append(element('span', { class: 'unread', 'aria-label': `${count} unread messages`, text: count > 99 ? '99+' : String(count) }));
   }
@@ -407,10 +415,11 @@ function showSettings() {
   const save = element('button', { class: 'primary-button', text: 'Save connection settings ↗', onclick: () => run(save, async () => {
     state = await native('settings', { relays: relays.input.value.split('\n').map((s) => s.trim()).filter(Boolean), rpc: rpc.input.value.trim() }); $('modal').close(); render(); await poll();
   }) });
-  modal('Settings', [appearance, element('button', { class: 'outline-button', text: 'Connections', onclick: showConnections }), element('div', { id: 'node-setting' }), element('div', { id: 'background-setting' }), element('div', { id: 'security-setting' }), element('div', { id: 'capture-setting' }),
+  modal('Settings', [appearance, element('button', { class: 'outline-button', text: 'Connections', onclick: showConnections }),
+    element('button', { class: 'outline-button', text: 'Chat storage', onclick: () => void ChatStorageUI.open() }), element('div', { id: 'node-setting' }), element('div', { id: 'background-setting' }), element('div', { id: 'security-setting' }), element('div', { id: 'capture-setting' }),
     element('button', { class: 'outline-button', text: 'Save an encrypted backup ↗', onclick: showBackup }),
-    element('details', { class: 'advanced-settings' }, element('summary', { text: 'Advanced settings' }), element('p', { text: 'Choose your delivery relays and wallet data service.' }), relays.label, rpc.label, save, element('button', { class: 'outline-button', text: 'Import a payment receipt', onclick: showImportReceipt }), element('button', { class: 'outline-button', text: 'Clear local chat history', onclick: showClearHistory }), element('p', { text: 'Direct-message encryption: X25519 and XSalsa20-Poly1305. The community chat and NOID payments are public.' }))], 'SETTINGS');
-  if (state.storage_full) $('modal-content').prepend(element('section', { class: 'wallet-reminder' }, element('strong', { text: 'Storage is full' }), element('p', { text: 'Save a backup, then clear local chat history to receive more messages.' }), element('button', { class: 'outline-button', text: 'Clear local chat history', onclick: showClearHistory })));
+    element('details', { class: 'advanced-settings' }, element('summary', { text: 'Advanced settings' }), element('p', { text: 'Choose your delivery relays and wallet data service.' }), relays.label, rpc.label, save, element('button', { class: 'outline-button', text: 'Import a payment receipt', onclick: showImportReceipt }), element('p', { text: 'Direct-message encryption: X25519 and XSalsa20-Poly1305. The community chat and NOID payments are public.' }))], 'SETTINGS');
+  if (state.storage_full) $('modal-content').prepend(element('section', { class: 'wallet-reminder' }, element('strong', { text: 'Storage is full' }), element('p', { text: 'Choose the chats to clear so new messages can arrive.' }), element('button', { class: 'outline-button', text: 'Choose chats', onclick: () => void ChatStorageUI.open() })));
   renderBackgroundSetting();
   renderSecuritySetting();
   renderCaptureSetting();
@@ -420,11 +429,6 @@ function showSettings() {
 function renderNodeSetting() {
   const panel=$('node-setting'); if(!panel)return;
   panel.replaceChildren(element('section',{class:'connection-card'},element('strong',{text:'Automatic wallet updates'}),element('p',{text:'Checks for wallet changes while the app is open. Your phone verifies new balances. Stops when you leave or lock the phone. Use Update balance to check now.'})));
-}
-
-function showClearHistory() {
-  const clear = element('button', { class: 'primary-button', text: 'Clear local history', onclick: () => run(clear, async () => { state = await native('clear_history', { confirmed: true }); $('modal').close(); render(); toast('Local chat history cleared. Your wallet and pending payments are kept.'); }) });
-  modal('Clear local chat history?', [element('p', { text: 'Removes chat messages from this phone. Your wallet, queued messages, pending payments and checked payment receipts are kept. Save a backup first if you want to keep the conversation history.' }), element('button', { class: 'outline-button', text: 'Save a backup first', onclick: showBackup }), clear, element('button', { class: 'text-button', text: 'Keep messages', onclick: showSettings })], 'STORAGE');
 }
 
 function renderSecuritySetting() {
@@ -529,6 +533,32 @@ function showInvoice() {
     state = await native('invoice', { contact_id: chat.slice(2), amount: paymentAmount(amount.input.value), memo: memo.input.value }); $('modal').close(); render(); await poll();
   }) });
   modal('Request a payment.', [amount.label, memo.label, send], 'NOID / REQUEST');
+}
+
+function showChatOptions(scope = chat) {
+  if (!scope) return;
+  const peer = scope.startsWith('d:') ? contact(scope.slice(2)) : null;
+  const actions = [];
+  if (peer) actions.push(element('button', { class: 'outline-button', text: 'View contact', onclick: () => showContact(peer) }));
+  actions.push(element('button', { class: 'outline-button', text: 'Clear history', onclick: () => void ChatStorageUI.open(scope) }), element('button', { class: 'outline-button', text: 'Manage chat storage', onclick: () => void ChatStorageUI.open() }));
+  if (peer) actions.push(element('button', { class: 'outline-button danger', text: 'Delete chat', onclick: () => showDeleteConversation(scope) }));
+  modal(peer?.name || 'Community', actions, 'CHAT OPTIONS');
+}
+
+function showDeleteConversation(scope) {
+  const peer = scope.startsWith('d:') ? contact(scope.slice(2)) : null;
+  if (!peer) return;
+  const remove = element('button', { class: 'primary-button destructive-button', text: 'Delete chat', onclick: () => run(remove, async () => {
+    state = await native('delete_conversation', { chat: scope, confirmed: true });
+    ChatUI.conversationDeleted(scope);
+    if (chat === scope) { chat = ''; tab = 'direct'; }
+    $('modal').close(); render(); toast('Chat and contact deleted. New messages can still arrive.');
+  }, 'Deleting…') });
+  const content = [element('p', { text: `Delete your conversation with ${peer.name} and remove this contact from your list?` }),
+    element('p', { text: 'This deletes the message history on this phone. A new message from this person will start a new chat.' })];
+  if (chatMessages(scope).some(message => message.status === 'queued')) content.push(element('p', { text: 'Already queued messages will still be delivered.' }));
+  content.push(element('button', { class: 'outline-button', text: 'Cancel', onclick: () => $('modal').close() }), remove);
+  modal('Delete chat and contact?', content, 'DELETE CHAT');
 }
 
 function showActions() {
@@ -650,6 +680,7 @@ $('message-scroll').addEventListener('scroll', () => { const s = $('message-scro
 $('restore-button').addEventListener('click', showRestore);
 $('payment-button').addEventListener('click', showSend);
 $('attachment-button').addEventListener('click', showActions);
+$('chat-options-button').addEventListener('click', () => showChatOptions());
 $('chat-profile').addEventListener('click', () => { if (chat?.startsWith('d:')) showContact(contact(chat.slice(2))); });
 $('wallet-address').addEventListener('click', () => copy(state.profile.address));
 $('receive-button').addEventListener('click', () => {

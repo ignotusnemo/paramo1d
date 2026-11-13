@@ -41,6 +41,7 @@ public final class MainActivity extends Activity {
     private boolean lockScreenDark;
     private boolean interfaceLoaded;
     private boolean pageReady;
+    private boolean keyboardVisible;
     private boolean interfaceReady;
     private boolean backupPickerActive;
     private boolean entryPromptAttempted;
@@ -120,15 +121,25 @@ public final class MainActivity extends Activity {
                 return new WebResourceResponse("text/plain", "utf-8", 403, "External resources blocked", java.util.Collections.emptyMap(), new java.io.ByteArrayInputStream(new byte[0]));
             }
             @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) { return !request.getUrl().toString().startsWith(ORIGIN + "/assets/"); }
-            @Override public void onPageFinished(WebView view, String url) { pageReady = true; handleContactIntent(getIntent()); }
+            @Override public void onPageFinished(WebView view, String url) { pageReady = true; web.evaluateJavascript("window.paramo1dKeyboard?.(" + keyboardVisible + ")", null); handleContactIntent(getIntent()); }
         });
         web.addJavascriptInterface(new Bridge(), "Paramo1d");
         root = new android.widget.FrameLayout(this);
         root.addView(web, new android.widget.FrameLayout.LayoutParams(-1, -1));
-        if (android.os.Build.VERSION.SDK_INT >= 35) root.setOnApplyWindowInsetsListener((view, insets) -> {
-            android.graphics.Insets bars = insets.getInsets(android.view.WindowInsets.Type.systemBars() | android.view.WindowInsets.Type.displayCutout());
-            android.graphics.Insets keyboard = insets.getInsets(android.view.WindowInsets.Type.ime());
-            view.setPadding(bars.left, bars.top, bars.right, Math.max(bars.bottom, keyboard.bottom)); return insets;
+        root.setOnApplyWindowInsetsListener((view, insets) -> {
+            boolean visible = android.os.Build.VERSION.SDK_INT >= 30
+                ? insets.isVisible(android.view.WindowInsets.Type.ime())
+                : insets.getSystemWindowInsetBottom() > insets.getStableInsetBottom() + Math.round(96 * getResources().getDisplayMetrics().density);
+            if (keyboardVisible != visible) {
+                keyboardVisible = visible;
+                if (pageReady) web.evaluateJavascript("window.paramo1dKeyboard?.(" + visible + ")", null);
+            }
+            if (android.os.Build.VERSION.SDK_INT >= 35) {
+                android.graphics.Insets bars = insets.getInsets(android.view.WindowInsets.Type.systemBars() | android.view.WindowInsets.Type.displayCutout());
+                android.graphics.Insets keyboard = insets.getInsets(android.view.WindowInsets.Type.ime());
+                view.setPadding(bars.left, bars.top, bars.right, Math.max(bars.bottom, keyboard.bottom));
+            }
+            return insets;
         });
         setContentView(root);
         applySystemTheme(getSharedPreferences("interface",MODE_PRIVATE).getString("theme","system"));
@@ -302,7 +313,7 @@ public final class MainActivity extends Activity {
         result.put("security", AppLock.state(application));
         result.put("allow_screenshots", application.getSharedPreferences("interface", MODE_PRIVATE).getBoolean("allow_screenshots", false));
         result.put("backup_saved", data.optLong("backup_saved_ms") > 0);
-        result.put("storage_full", data.optBoolean("storage_full"));
+        result.put("storage_full", data.optBoolean("storage_full") || data.getJSONArray("messages").length() >= ChatHistory.MAX_MESSAGES || store.isFull());
         result.put("notifications_enabled", application.getSystemService(android.app.NotificationManager.class).areNotificationsEnabled());
         JSONObject unread = new JSONObject(), read = data.getJSONObject("read_messages"); JSONArray history = data.getJSONArray("messages"); String own = data.optJSONObject("profile") == null ? "" : data.getJSONObject("profile").getString("id");
         for (int i = 0; i < history.length(); i++) { JSONObject message = history.getJSONObject(i); String scope = message.getString("chat"); if (message.getString("id").equals(read.optString(scope))) unread.put(scope,0); else if (!message.getJSONObject("sender").getString("id").equals(own)) unread.put(scope, unread.optInt(scope) + 1); }
@@ -380,23 +391,27 @@ public final class MainActivity extends Activity {
             case "lock_now": appLock.lock(); pauseNode(); runOnUiThread(this::showLockScreen); return new JSONObject().put("locked", true);
             case "phone_security": runOnUiThread(() -> startActivity(new Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS))); return new JSONObject().put("opening", true);
             case "notification_settings": runOnUiThread(() -> startActivity(new Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(android.provider.Settings.EXTRA_APP_PACKAGE,getPackageName()))); return new JSONObject().put("opening", true);
+            case "chat_storage": return ChatHistory.summary(data, store.savedBytes(), SecureStore.ADMISSION_BYTES);
+            case "delete_conversation": {
+                if (!request.optBoolean("confirmed")) throw new Exception("Confirm deleting this chat and contact.");
+                String scope = request.getString("chat");
+                JSONObject next = ChatHistory.deleteConversation(data, scope, System.currentTimeMillis());
+                store.save(next); ChatHistory.apply(data, next);
+                android.app.NotificationManager manager = getSystemService(android.app.NotificationManager.class);
+                manager.cancel(1000 + Math.floorMod(scope.hashCode(),1000000));
+                if (data.getJSONArray("messages").length() < ChatHistory.MAX_MESSAGES && !store.isFull()) manager.cancel("storage", 1);
+                if (scope.equals(activeConversation)) activeConversation = "";
+                nextInboxAttempt = 0; poll(); return view();
+            }
             case "clear_history": {
                 if (!request.optBoolean("confirmed")) throw new Exception("Confirm clearing local chat history.");
-                Set<String> queued = new HashSet<>(); JSONArray outbox = data.getJSONArray("outbox");
-                for (int i = 0; i < outbox.length(); i++) queued.add(outbox.getJSONObject(i).getString("id"));
-                JSONArray kept = new JSONArray(), messages = data.getJSONArray("messages"), receipts = data.getJSONArray("receipts"), observations = data.getJSONArray("observations"), prepared = data.getJSONArray("prepared_payments"), pending = new JSONArray();
-                for (int i = 0; i < messages.length(); i++) if (queued.contains(messages.getJSONObject(i).getString("id"))) kept.put(messages.getJSONObject(i));
-                Set<String> checked = new HashSet<>();
-                for (int i = 0; i < receipts.length(); i++) { JSONObject receipt = receipts.getJSONObject(i); if (!receipt.optBoolean("verified")) continue; String txid = receipt.getString("txid"); checked.add(txid);
-                    for (int j = 0; j < prepared.length(); j++) { JSONObject packet = prepared.getJSONObject(j); if (packet.getString("txid").equals(txid) && receipt.isNull("amount")) receipt.put("amount",packet.optString("amount")); }
-                    if (receipt.optString("receipt_hex").isEmpty()) for (int j = 0; j < observations.length(); j++) { JSONObject observation = observations.getJSONObject(j), message = observation.getJSONObject("message"); if (observation.getJSONObject("sender").getString("id").equals(data.getJSONObject("profile").getString("id")) && message.optString("txid").equals(txid) && !message.isNull("receipt_hex")) { receipt.put("receipt_hex",message.optString("receipt_hex")); break; } }
-                }
-                Set<String> preserveReports = new HashSet<>();
-                for (int i = 0; i < prepared.length(); i++) if (!checked.contains(prepared.getJSONObject(i).getString("txid"))) { pending.put(prepared.getJSONObject(i)); preserveReports.add(prepared.getJSONObject(i).getString("txid")); }
-                for (int i = 0; i < receipts.length(); i++) if (receipts.getJSONObject(i).optString("receipt_hex").isEmpty()) preserveReports.add(receipts.getJSONObject(i).optString("txid"));
-                JSONArray reports = new JSONArray(); for (int i = 0; i < observations.length(); i++) if (preserveReports.contains(observations.getJSONObject(i).getJSONObject("message").optString("txid"))) reports.put(observations.getJSONObject(i));
-                data.put("messages",kept).put("envelopes",new JSONArray(outbox.toString())).put("observations",reports).put("prepared_payments",pending).put("read_messages",new JSONObject()).put("storage_full",false);
-                store.save(data); nextInboxAttempt = 0; poll(); return view();
+                JSONObject next = ChatHistory.clear(data, request.optJSONArray("chats"), System.currentTimeMillis());
+                store.save(next); ChatHistory.apply(data, next);
+                android.app.NotificationManager manager = getSystemService(android.app.NotificationManager.class);
+                JSONArray selected = request.getJSONArray("chats");
+                for (int i = 0; i < selected.length(); i++) manager.cancel(1000 + Math.floorMod(selected.getString(i).hashCode(),1000000));
+                if (data.getJSONArray("messages").length() < ChatHistory.MAX_MESSAGES && !store.isFull()) manager.cancel("storage", 1);
+                nextInboxAttempt = 0; poll(); return view();
             }
             case "view_chat": {
                 String scope = request.getString("chat");
@@ -428,6 +443,7 @@ public final class MainActivity extends Activity {
             case "save_draft": {
                 String scope = request.getString("chat"), text = request.optString("text"), reply = request.optString("reply_to");
                 if (!scope.equals("g:parano1d") && !scope.matches("d:[0-9a-f]{64}")) throw new Exception("Choose a conversation.");
+                if (scope.startsWith("d:")) findContact(scope.substring(2));
                 if (text.getBytes(StandardCharsets.UTF_8).length > 4096 || !reply.isEmpty() && !reply.matches("[0-9a-f]{64}")) throw new Exception("Draft exceeds the message limit.");
                 JSONObject drafts = data.getJSONObject("drafts");
                 JSONObject next = new JSONObject().put("text", text).put("reply_to", reply);
@@ -537,8 +553,31 @@ public final class MainActivity extends Activity {
         }
         if (contacts.length() >= 1000) throw new Exception("Contact limit reached"); contacts.put(contact); store.save(data); return view();
     }
+    private static void markStorageFull() throws Exception {
+        boolean first = !data.optBoolean("storage_full"); data.put("storage_full", true);
+        if (!first) return;
+        MainActivity activity = active.get();
+        if (activity != null && activity.visible && activity.appLock != null && !activity.appLock.needsUnlock()) return;
+        try {
+            android.app.NotificationManager manager = application.getSystemService(android.app.NotificationManager.class);
+            if (!manager.areNotificationsEnabled()) return;
+            manager.createNotificationChannel(new android.app.NotificationChannel("storage", "Chat storage", android.app.NotificationManager.IMPORTANCE_DEFAULT));
+            Intent intent = new Intent(application, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+            android.app.PendingIntent open = android.app.PendingIntent.getActivity(application, 2000001, intent, android.app.PendingIntent.FLAG_UPDATE_CURRENT | android.app.PendingIntent.FLAG_IMMUTABLE);
+            manager.notify("storage", 1, new android.app.Notification.Builder(application, "storage").setSmallIcon(R.drawable.ic_message)
+                .setContentTitle("Chat storage is full").setContentText("Open Paramo1d to choose which chats to clear.")
+                .setContentIntent(open).setAutoCancel(true).setOnlyAlertOnce(true).build());
+        } catch (RuntimeException unavailable) { }
+    }
+    private static void requireMessageCapacity() throws Exception {
+        if (data.getJSONArray("messages").length() >= ChatHistory.MAX_MESSAGES) { markStorageFull(); throw new SecureStore.Full(); }
+    }
+    private static void reserveStorage(int bytes) throws Exception {
+        try { store.reserveRoom(bytes); }
+        catch (SecureStore.Full full) { markStorageFull(); throw full; }
+    }
     private static void sendMessage(String chat, JSONObject message) throws Exception {
-        if (data.getJSONArray("messages").length() >= 5000) throw new SecureStore.Full();
+        requireMessageCapacity();
         JSONObject destination;
         if (chat.equals("g:parano1d")) destination = new JSONObject().put("type", "group").put("room", "parano1d");
         else if (chat.startsWith("d:")) destination = new JSONObject().put("type", "direct").put("contact", findContact(chat.substring(2)));
@@ -547,7 +586,7 @@ public final class MainActivity extends Activity {
         JSONObject envelope = core("seal", new JSONObject().put("sender", data.getJSONObject("profile")).put("destination", destination).put("message", message)).getJSONObject("envelope");
         int envelopeBytes = envelope.toString().getBytes(StandardCharsets.UTF_8).length;
         if (data.getJSONArray("outbox").toString().getBytes(StandardCharsets.UTF_8).length + envelopeBytes > 4 * 1024 * 1024) throw new Exception("Outgoing queue is full. Reconnect before sending more messages.");
-        store.reserveRoom(Math.multiplyExact(4,envelopeBytes));
+        reserveStorage(Math.multiplyExact(4,envelopeBytes));
         JSONObject local = new JSONObject().put("id", envelope.getString("id")).put("chat", chat).put("sender", data.getJSONObject("profile")).put("message", message).put("created_ms", System.currentTimeMillis()).put("status", "queued");
         if (payment != null) local.put("payment", payment);
         if (!message.optString("type").equals("relay_update")) data.getJSONArray("messages").put(local);
@@ -652,7 +691,9 @@ public final class MainActivity extends Activity {
         long processed = cursors.optLong(cursorKey);
         if (page.getLong("cursor") < cursors.optLong(cursorKey)) throw new Exception("Relay cursor moved backwards");
         JSONArray deliveries = page.getJSONArray("messages");
+        if (deliveries.length() == 0) return;
         Set<String> known = new HashSet<>();
+        known.addAll(ChatHistory.clearedIds(data, System.currentTimeMillis()));
         for (String key : new String[]{"messages", "observations"}) { JSONArray list = data.getJSONArray(key); for (int i = 0; i < list.length(); i++) known.add(list.getJSONObject(i).getString("id")); }
         for (int i = 0; i < deliveries.length(); i++) {
             JSONObject envelope = deliveries.getJSONObject(i).getJSONObject("envelope");
@@ -666,17 +707,17 @@ public final class MainActivity extends Activity {
                 if (authenticated) { addContact(sender); chat = "d:" + sender.getString("id"); }
                 JSONObject local = new JSONObject().put("id", opened.getString("id")).put("chat", chat).put("sender", sender).put("message", opened.getJSONObject("message")).put("created_ms", envelope.getJSONObject("data").getLong("created_ms")).put("status", "received");
                 String key = local.getJSONObject("message").getString("type").equals("relay_update") ? "observations" : "messages";
-                if (key.equals("observations")) { store.reserveRoom(Math.multiplyExact(4,envelope.toString().getBytes(StandardCharsets.UTF_8).length)); recordObservation(local); }
+                if (key.equals("observations")) { reserveStorage(Math.multiplyExact(4,envelope.toString().getBytes(StandardCharsets.UTF_8).length)); recordObservation(local); }
                 else {
-                    if (data.getJSONArray(key).length() >= 5000) throw new SecureStore.Full();
+                    requireMessageCapacity();
                     if (local.getJSONObject("message").optString("type").equals("transaction")) local.put("payment", core("broadcast_preview", new JSONObject().put("intent_hex", local.getJSONObject("message").getString("intent_hex"))));
-                    store.reserveRoom(Math.multiplyExact(4,envelope.toString().getBytes(StandardCharsets.UTF_8).length));
+                    reserveStorage(Math.multiplyExact(4,envelope.toString().getBytes(StandardCharsets.UTF_8).length));
                     data.getJSONArray(key).put(local);
                     notifyMessage(local);
                 }
                 retainEnvelope(envelope); NearbyService.offer(envelope);
                 known.add(opened.getString("id"));
-            } catch (SecureStore.Full full) { data.put("storage_full",true); break; }
+            } catch (SecureStore.Full full) { markStorageFull(); break; }
             catch (Exception rejected) { }
             processed = deliveries.getJSONObject(i).getLong("cursor");
         }
@@ -848,7 +889,7 @@ public final class MainActivity extends Activity {
         if (!nodeAllowed() && !request.getString("op").equals("payment_send")) throw new Exception("Open Paramo1d to update your wallet");
         if (nodeAllowed()) nodeControl(true);
         if (!automatic) nextNodeAttempt=System.currentTimeMillis()+10000;
-        if (request.getString("op").equals("payment_send")) store.reserveRoom(2 * 1024 * 1024);
+        if (request.getString("op").equals("payment_send")) reserveStorage(2 * 1024 * 1024);
         if(automatic) request.put("follow",true);
         JSONObject snapshot = new JSONObject().put("seed_hex",data.getString("seed_hex")).put("settings",new JSONObject(data.getJSONObject("settings").toString()));
         snapshot.put("online",data.getJSONObject("connection").optBoolean("online"));
@@ -1226,6 +1267,7 @@ public final class MainActivity extends Activity {
                 result.put("ids", ids);
             } else if (action.equals("missing")) {
                 JSONArray wanted = new JSONArray(), requested = args.getJSONArray("ids"); if (requested.length() > 128) throw new Exception("Nearby inventory exceeds limit"); Set<String> known = new HashSet<>();
+                known.addAll(ChatHistory.clearedIds(data, System.currentTimeMillis()));
                 for (String key : new String[]{"envelopes", "messages", "observations"}) { JSONArray list = data.getJSONArray(key); for (int i = 0; i < list.length(); i++) known.add(list.getJSONObject(i).getString("id")); }
                 for (int i = 0; i < requested.length() && wanted.length() < 8; i++) { String id = requested.getString(i); if (id.matches("[0-9a-f]{64}") && !known.contains(id)) wanted.put(id); }
                 result.put("ids", wanted);
@@ -1243,6 +1285,7 @@ public final class MainActivity extends Activity {
     }
     private static JSONObject acceptNearby(JSONObject envelope) throws Exception {
         String id = envelope.getString("id");
+        if (ChatHistory.wasCleared(data, id, System.currentTimeMillis())) return new JSONObject().put("id", id).put("new", false);
         for (String key : new String[]{"envelopes", "messages", "observations"}) { JSONArray list = data.getJSONArray(key); for (int i = 0; i < list.length(); i++) if (list.getJSONObject(i).getString("id").equals(id)) return new JSONObject().put("id", id).put("new", false); }
         JSONObject destination = envelope.getJSONObject("data").getJSONObject("destination"); boolean direct = destination.getString("type").equals("direct");
         if (!direct && (!destination.getString("type").equals("group") || !destination.getString("room").equals("parano1d"))) throw new Exception("Unknown nearby channel");
@@ -1253,9 +1296,9 @@ public final class MainActivity extends Activity {
             JSONObject sender = opened.getJSONObject("sender"); if (own) addContact(sender);
             JSONObject message = opened.getJSONObject("message");
             JSONObject local = new JSONObject().put("id", id).put("chat", own ? "d:" + sender.getString("id") : "g:parano1d").put("sender", sender).put("message", message).put("created_ms", envelope.getJSONObject("data").getLong("created_ms")).put("status", "received").put("via_nearby", true);
-            if (message.getString("type").equals("relay_update")) { store.reserveRoom(Math.multiplyExact(4,envelope.toString().getBytes(StandardCharsets.UTF_8).length)); recordObservation(local); }
-            else { if (data.getJSONArray("messages").length() >= 5000) throw new SecureStore.Full(); if (message.getString("type").equals("transaction")) local.put("payment", core("broadcast_preview", new JSONObject().put("intent_hex", message.getString("intent_hex")))); store.reserveRoom(Math.multiplyExact(4,envelope.toString().getBytes(StandardCharsets.UTF_8).length)); data.getJSONArray("messages").put(local); notifyMessage(local); }
-        } else store.reserveRoom(Math.multiplyExact(4,envelope.toString().getBytes(StandardCharsets.UTF_8).length));
+            if (message.getString("type").equals("relay_update")) { reserveStorage(Math.multiplyExact(4,envelope.toString().getBytes(StandardCharsets.UTF_8).length)); recordObservation(local); }
+            else { requireMessageCapacity(); if (message.getString("type").equals("transaction")) local.put("payment", core("broadcast_preview", new JSONObject().put("intent_hex", message.getString("intent_hex")))); reserveStorage(Math.multiplyExact(4,envelope.toString().getBytes(StandardCharsets.UTF_8).length)); data.getJSONArray("messages").put(local); notifyMessage(local); }
+        } else reserveStorage(Math.multiplyExact(4,envelope.toString().getBytes(StandardCharsets.UTF_8).length));
         retainEnvelope(envelope); data.getJSONArray("outbox").put(envelope); store.save(data); queueDelivery(); publishView();
         return new JSONObject().put("id", id).put("new", true);
     }

@@ -241,9 +241,8 @@ window.ChatUI = (() => {
     else { $('chat-avatar').classList.remove('warrior-avatar'); $('chat-avatar').replaceChildren(icon('community')); }
     $('chat-description').textContent = direct ? 'Encrypted conversation' : 'Public community';
     $('chat-context').hidden = !state.storage_full;
-    $('chat-context').textContent = state.storage_full ? 'Storage is full. Save a backup or clear local chat history in Settings.' : '';
+    $('chat-context').textContent = state.storage_full ? 'Storage is full. Tap Choose chats above to clear some history.' : '';
     $('payment-button').hidden = !direct; $('back-button').hidden = !direct; $('attachment-button').hidden = false;
-    $('compose-note').textContent = state.connection?.online ? direct ? 'Encrypted on your phone' : 'Public message' : (state.nearby?.peers || []).length ? 'Bluetooth · a connected person can relay your messages' : 'Offline · messages stay saved until you connect';
     composer();
     const full = history(), byId = new Map(full.map(item => [item.id, item])), reactions = new Map();
     for (const item of full) {
@@ -380,7 +379,8 @@ window.ChatUI = (() => {
       const restored = current.text ? { ...current, text: `${saved.text}\n${current.text}` } : saved;
       drafts.set(scope, restored);
       if (chat === scope) { input.value = restored.text; replyId = restored.reply_to; }
-      toast(explainError(error.message));
+      if (ChatStorageUI.isFullError(error.message)) ChatStorageUI.reportFull();
+      else toast(explainError(error.message));
     }
     finally { sending = false; composer(); }
   }
@@ -400,6 +400,14 @@ window.ChatUI = (() => {
     if (!$('chat-search').hidden) { closeSearch(); return true; }
     if (replyId) { replyId = ''; composer(); inputChanged(); return true; }
     return false;
+  }
+  function layoutChanged() {
+    const wrapper = document.querySelector('.compose-wrapper');
+    if (wrapper && !$('chat-panel').hidden) {
+      const height = `${Math.ceil(wrapper.getBoundingClientRect().height)}px`;
+      if ($('chat-panel').style.getPropertyValue('--composer-height') !== height) $('chat-panel').style.setProperty('--composer-height', height);
+    }
+    queueBottom();
   }
   function setup() {
     $('compose-form').addEventListener('submit', send);
@@ -422,6 +430,8 @@ window.ChatUI = (() => {
     if (typeof ResizeObserver === 'function') {
       const sizing = new ResizeObserver(queueBottom);
       sizing.observe($('messages'), { box: 'border-box' }); sizing.observe($('message-scroll'));
+      const composerSizing = new ResizeObserver(layoutChanged);
+      composerSizing.observe(document.querySelector('.compose-wrapper'));
     }
     document.fonts?.ready.then(queueBottom);
     $('chat-search-button').addEventListener('click', () => { $('chat-search').hidden = false; $('chat-search-input').focus(); });
@@ -432,5 +442,25 @@ window.ChatUI = (() => {
     document.addEventListener('visibilitychange', () => { if (document.hidden) { keepDraft(); persistDraft(); } });
     document.addEventListener('keydown', event => { if (event.key === 'Escape' && !$('modal').open) back(); });
   }
-  return { render: renderChat, preview, beforeSwitch, setup, back, jumpTo, composer, messageMenu };
+  function historyCleared(scopes) {
+    const known = new Set((state.messages || []).map(item => item.id));
+    for (const scope of scopes) {
+      const saved = drafts.get(scope);
+      if (saved?.reply_to && !known.has(saved.reply_to)) saved.reply_to = '';
+    }
+    if (scopes.includes(currentChat)) {
+      if (replyId && !known.has(replyId)) replyId = '';
+      renderKey = ''; rangeStart = null; rangeEnd = null; rows.clear();
+      closeSearch(); composer();
+    }
+  }
+  function conversationDeleted(scope) {
+    clearTimeout(draftTimers.get(scope)); draftTimers.delete(scope); drafts.delete(scope);
+    if (currentChat !== scope) return;
+    for (const cached of rows.values()) for (const card of cached.node.querySelectorAll('.contact-card')) cardObserver?.unobserve(card);
+    currentChat = ''; renderKey = ''; rangeStart = null; rangeEnd = null; rows.clear();
+    replyId = ''; $('compose').value = ''; closeEmoji(); closeSearch();
+    $('messages').replaceChildren();
+  }
+  return { render: renderChat, preview, beforeSwitch, setup, back, jumpTo, composer, messageMenu, historyCleared, conversationDeleted, layoutChanged };
 })();

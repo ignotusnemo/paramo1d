@@ -70,7 +70,13 @@ An identity begins with 32 random bytes generated on the device. Domain-separate
 
 The Android Keystore protects the local AES-GCM archive key. Portable backups use Argon2id and XChaCha20-Poly1305 with fresh salt and nonce. Export an encrypted backup and keep its password separately. Restore through Android's document picker on an empty installation.
 
-Local message storage has explicit entry and byte limits. A full archive pauses incoming delivery without advancing past an unhandled message. Settings offers an encrypted backup and an explicit action to clear local chat history. Clearing preserves the wallet, queued messages, pending payments and checked payment receipts. Completed payments are excluded from the pending-input reservation budget.
+Open **Settings → Chat storage** to see message counts and local storage use. Community can be cleared separately. Select any private conversations or use Select all. A conversation's three-dot menu also opens **Clear history** with that chat already selected. Clearing affects history on this phone and keeps contacts, drafts, queued messages, the wallet and saved payment records.
+
+Each private chat has a three-dot menu in the Messages list. **Delete chat** removes its message history, draft and contact from this phone. New messages from that person start a new chat. Already queued deliveries continue, and the wallet and saved payment records are preserved. The same action is available in the open chat's three-dot menu.
+
+Community and private chats use a floating message field. History scrolls behind the controls, with enough space to keep the latest message visible. Mobile navigation floats above the bottom edge and hides while the keyboard is open. Replies, multiline drafts and the emoji picker adjust the space automatically.
+
+Local message storage has explicit entry and byte limits. A full archive pauses incoming delivery without advancing past an unhandled message. The app opens the chat chooser when space runs out and leaves a visible Choose chats reminder after dismissal. Background delivery posts a storage notification. Recently cleared message IDs remain in a bounded replay cache for their delivery lifetime, so ordinary relay retries and Bluetooth exchange preserve the cleanup. The cache retains at most 20,000 IDs for at most seven days. Completed payments are excluded from the pending-input reservation budget.
 
 The bundled WebView loads its interface, fonts and scripts from APK assets. Network requests and wallet operations execute in the native host. The JavaScript view receives public profile information, conversation content and payment reviews. Secret-bearing requests are constructed in the native host.
 
@@ -120,6 +126,7 @@ The [Redmi device report](reports/redmi-15c-2026-11-10.md) records the public de
 cargo test --locked --lib
 cargo test --locked -p paramo1d-courier -p paramo1d-relay
 python3 scripts/check-upstream.py
+/path/to/gradle -p android :app:testDebugUnitTest
 cd android/tests
 npm install
 npm test

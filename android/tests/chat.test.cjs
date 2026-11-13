@@ -176,6 +176,15 @@ const { bridge, server, output } = require('./ui.test.cjs');
       await page.setViewportSize({ width, height: 844 });
       await page.evaluate(theme => { testState.settings.theme = theme; paramo1dUpdate(JSON.parse(JSON.stringify(testState))); }, theme);
       assert.equal(await page.locator('body').evaluate(body => body.scrollWidth <= window.innerWidth), true, `${theme} ${width}px must fit horizontally`);
+      assert.equal(await page.locator('#compose-note').count(), 0, 'The composer must not reserve a status footer');
+      await page.waitForFunction(() => {
+        const form = document.getElementById('compose-form').getBoundingClientRect();
+        const last = document.querySelector('#messages .message:last-child')?.getBoundingClientRect();
+        return form.height > 0 && (!last || last.bottom <= form.top);
+      });
+      assert.equal(await page.locator('.compose-wrapper').evaluate(node => getComputedStyle(node).backgroundColor), 'rgba(0, 0, 0, 0)', 'The message history must continue behind the floating composer');
+      assert.equal(await page.locator('.compose-footer').isVisible(), false, 'An unused byte counter must not occupy space');
+      assert(await page.evaluate(() => document.getElementById('message-scroll').getBoundingClientRect().bottom > document.getElementById('compose-form').getBoundingClientRect().top), 'Messages must scroll behind the composer');
       if (width === 390) {
         await page.screenshot({ path: path.join(output, `chat-${theme}.png`) });
         await page.locator('#connection').click();
@@ -186,6 +195,21 @@ const { bridge, server, output } = require('./ui.test.cjs');
         await page.locator('#close-modal').click();
       }
     }
+    await page.setViewportSize({ width: 390, height: 480 });
+    await page.evaluate(() => window.paramo1dKeyboard(true));
+    assert.equal(await page.locator('.mobile-tabs').isVisible(), false, 'The keyboard must hide bottom navigation');
+    await page.locator('#compose').fill('A multiline draft.\nWith a second line.\nAnd another line.');
+    await page.waitForFunction(() => {
+      const input = document.getElementById('compose-form').getBoundingClientRect();
+      const last = document.querySelector('#messages .message:last-child')?.getBoundingClientRect();
+      return input.bottom <= innerHeight && input.bottom >= innerHeight - 16 && (!last || last.bottom <= input.top);
+    });
+    assert.equal(await page.getByRole('button', { name: 'Send message', exact: true }).isEnabled(), true);
+    await page.screenshot({ path: path.join(output, 'chat-keyboard.png') });
+    await page.locator('#compose').fill('');
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.evaluate(() => window.paramo1dKeyboard(false));
+    assert.equal(await page.locator('.mobile-tabs').isVisible(), true, 'Closing the keyboard must restore navigation');
     assert.deepEqual(failures, []);
     console.log('PASS: replies, copy, emoji, reactions, drafts, verified contact cards, pixel avatars, expired payment recovery, message search, UTF-8 limits, bounded history, stable scrolling and responsive themes.');
   } finally { await browser.close(); server.close(); }

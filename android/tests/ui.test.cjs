@@ -30,6 +30,7 @@ async function bridge(page) {
     window.testState = state; window.testCalls = [];
     window.Paramo1d = { request(id, encoded) {
       const request = JSON.parse(encoded); window.testCalls.push(request);
+      if (request.op === 'send' && window.testSendStorageFull) { queueMicrotask(() => window.paramo1dReply(id, { ok: false, error: 'App storage is full. Open Settings to clear local chat history.' })); return; }
       let result = state;
       if (request.op === 'sync' && window.testDeferSync) { window.testSyncRequest = id; return; }
       if (request.op === 'theme') state.settings.theme = request.value;
@@ -42,6 +43,29 @@ async function bridge(page) {
       }
       if (request.op === 'paranoid_mode') state.paranoid_mode=request.enabled;
       if (request.op === 'mark_read') { state.unread = state.unread || {}; state.unread[request.chat] = 0; }
+      if (request.op === 'chat_storage') {
+        if (window.testStorageError) { queueMicrotask(() => window.paramo1dReply(id, { ok: false, error: 'Storage unavailable' })); return; }
+        const scopes = new Map([['g:parano1d', { id: 'g:parano1d', name: 'Community', messages: 0, clearable: 0, queued: 0, bytes: 0, clearable_bytes: 0 }]]);
+        for (const message of state.messages) {
+          if (!scopes.has(message.chat)) scopes.set(message.chat, { id: message.chat, name: state.contacts.find(c => 'd:' + c.id === message.chat)?.name || message.sender.name, messages: 0, clearable: 0, queued: 0, bytes: 0, clearable_bytes: 0 });
+          const row = scopes.get(message.chat); row.messages++; row.bytes += 1024;
+          if (message.status === 'queued') row.queued++; else { row.clearable++; row.clearable_bytes += 1024; }
+        }
+        result = { messages: state.messages.length, message_limit: 5000, used_bytes: state.messages.length * 1024, byte_limit: 24 * 1024 * 1024, full: !!state.storage_full, chats: [...scopes.values()] };
+      }
+      if (request.op === 'clear_history') {
+        state.messages = state.messages.filter(message => !request.chats.includes(message.chat) || message.status === 'queued');
+        for (const scope of request.chats) if (state.unread) delete state.unread[scope];
+        state.storage_full = false;
+      }
+      if (request.op === 'delete_conversation') {
+        if (window.testDeleteError) { queueMicrotask(() => window.paramo1dReply(id, { ok: false, error: 'Chat could not be deleted. Try again.' })); return; }
+        state.messages = state.messages.filter(message => message.chat !== request.chat);
+        state.contacts = state.contacts.filter(contact => 'd:' + contact.id !== request.chat);
+        if (state.drafts) delete state.drafts[request.chat];
+        if (state.unread) delete state.unread[request.chat];
+        state.storage_full = false;
+      }
       if (request.op === 'protection_enable') { state.protection = { enabled: true, connected: true }; state.background_delivery = true; }
       if (request.op === 'protection_disable') state.protection = { enabled: false };
       if (request.op === 'nearby_start') state.nearby = { enabled: true, peers: [], devices: [] };
@@ -50,6 +74,7 @@ async function bridge(page) {
       if (request.op === 'background_disable') state.background_delivery = false;
       if (request.op === 'send') state.messages.push({ id: 'sent-' + window.testCalls.length, chat: request.chat, sender: alice, message: request.message, created_ms: Date.now(), status: 'queued' });
       if (request.op === 'save_draft') {
+        if (request.chat.startsWith('d:') && !state.contacts.some(contact => 'd:' + contact.id === request.chat)) { queueMicrotask(() => window.paramo1dReply(id, { ok: false, error: 'Add this contact first' })); return; }
         state.drafts ||= {};
         if (request.text || request.reply_to) state.drafts[request.chat] = { text: request.text, reply_to: request.reply_to };
         else delete state.drafts[request.chat];

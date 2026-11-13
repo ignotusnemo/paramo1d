@@ -19,16 +19,19 @@ final class SecureStore {
     private static final String ALIAS = "paramo1d-local-store-v1";
     private static final byte[] AAD = "Paramo1d/local-store/1".getBytes(StandardCharsets.UTF_8);
     private static final int MAX_BYTES = 32 * 1024 * 1024;
+    static final int ADMISSION_BYTES = 24 * 1024 * 1024;
     private final AtomicFile file;
     private int savedBytes;
     private long reservedBytes;
     static final class Full extends Exception { Full() { super("App storage is full. Open Settings to clear local chat history."); } }
     void reserveRoom(int bytes) throws Full {
         if (bytes <= 0) return;
-        if ((long)savedBytes + reservedBytes + bytes > 24L * 1024 * 1024) throw new Full();
+        if ((long)savedBytes + reservedBytes + bytes > ADMISSION_BYTES) throw new Full();
         reservedBytes += bytes;
     }
     SecureStore(Context context) { file = new AtomicFile(new File(context.getFilesDir(), "identity.pmc")); }
+    int savedBytes() { return savedBytes; }
+    boolean isFull() { return (long)savedBytes + reservedBytes >= ADMISSION_BYTES; }
     private SecretKey key() throws Exception {
         KeyStore store = KeyStore.getInstance("AndroidKeyStore"); store.load(null);
         if (!store.containsAlias(ALIAS)) {

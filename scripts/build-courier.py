@@ -62,6 +62,6 @@ env = os.environ.copy()
 env.update(JAVA_HOME=str(args.java_home.resolve()), ANDROID_HOME=str(args.sdk.resolve()), ANDROID_SDK_ROOT=str(args.sdk.resolve()))
 env["PATH"] = str(args.java_home.resolve() / "bin") + os.pathsep + env["PATH"]
 task = ":app:assembleRelease" if args.variant == "release" else ":app:assembleDebug"
-subprocess.run([str(args.gradle.resolve()), "-p", str(root / "android"), task, "--console=plain", "--no-daemon"], env=env, check=True)
+subprocess.run([str(args.gradle.resolve()), "-p", str(root / "android"), ":app:testDebugUnitTest", task, "--console=plain", "--no-daemon"], env=env, check=True)
 apk = root / f"android/app/build/outputs/apk/{args.variant}/app-{args.variant}.apk"
 print(json.dumps({"apk": str(apk), "bytes": apk.stat().st_size, "sha256": hashlib.sha256(apk.read_bytes()).hexdigest()}))
