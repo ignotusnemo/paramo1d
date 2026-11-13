@@ -406,6 +406,8 @@ window.ChatUI = (() => {
     if (wrapper && !$('chat-panel').hidden) {
       const height = `${Math.ceil(wrapper.getBoundingClientRect().height)}px`;
       if ($('chat-panel').style.getPropertyValue('--composer-height') !== height) $('chat-panel').style.setProperty('--composer-height', height);
+      const toolbarHeight = `${Math.ceil(document.querySelector('.chat-toolbar').getBoundingClientRect().height)}px`;
+      if ($('chat-panel').style.getPropertyValue('--chat-toolbar-height') !== toolbarHeight) $('chat-panel').style.setProperty('--chat-toolbar-height', toolbarHeight);
     }
     queueBottom();
   }
@@ -432,6 +434,7 @@ window.ChatUI = (() => {
       sizing.observe($('messages'), { box: 'border-box' }); sizing.observe($('message-scroll'));
       const composerSizing = new ResizeObserver(layoutChanged);
       composerSizing.observe(document.querySelector('.compose-wrapper'));
+      composerSizing.observe(document.querySelector('.chat-toolbar'));
     }
     document.fonts?.ready.then(queueBottom);
     $('chat-search-button').addEventListener('click', () => { $('chat-search').hidden = false; $('chat-search-input').focus(); });

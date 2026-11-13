@@ -74,7 +74,7 @@ Open **Settings → Chat storage** to see message counts and local storage use. 
 
 Each private chat has a three-dot menu in the Messages list. **Delete chat** removes its message history, draft and contact from this phone. New messages from that person start a new chat. Already queued deliveries continue, and the wallet and saved payment records are preserved. The same action is available in the open chat's three-dot menu.
 
-Community and private chats use a floating message field. History scrolls behind the controls, with enough space to keep the latest message visible. Mobile navigation floats above the bottom edge and hides while the keyboard is open. Replies, multiline drafts and the emoji picker adjust the space automatically.
+Community and private chats use floating conversation controls and a floating message field. History scrolls behind the controls, with enough space to keep the first and latest messages visible. Mobile navigation floats above the bottom edge and hides while the keyboard is open. Search, replies, multiline drafts and the emoji picker adjust the space automatically.
 
 Local message storage has explicit entry and byte limits. A full archive pauses incoming delivery without advancing past an unhandled message. The app opens the chat chooser when space runs out and leaves a visible Choose chats reminder after dismissal. Background delivery posts a storage notification. Recently cleared message IDs remain in a bounded replay cache for their delivery lifetime, so ordinary relay retries and Bluetooth exchange preserve the cleanup. The cache retains at most 20,000 IDs for at most seven days. Completed payments are excluded from the pending-input reservation budget.
 
