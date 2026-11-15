@@ -94,7 +94,7 @@ func Start(config Config) (*Client, error) {
 		}
 	}
 	address, e := netip.ParseAddr(config.Address)
-	if e != nil || !netip.MustParsePrefix("10.80.0.0/24").Contains(address) || address == netip.MustParseAddr("10.80.0.1") {
+	if e != nil || !netip.MustParsePrefix("10.80.0.0/16").Contains(address) || address == netip.MustParseAddr("10.80.0.0") || address == netip.MustParseAddr("10.80.0.1") || address == netip.MustParseAddr("10.80.255.255") {
 		return nil, errors.New("invalid tunnel address")
 	}
 	endpoint, e := netip.ParseAddrPort(config.Endpoint)
@@ -160,7 +160,10 @@ func Start(config Config) (*Client, error) {
 		if e != nil {
 			return nil, errors.New("protected connection is unavailable")
 		}
-		stream.SetDeadline(time.Now().Add(15 * time.Second))
+		deadline, _ := ctx.Deadline()
+		stream.SetDeadline(deadline)
+		stop := context.AfterFunc(ctx, func() { stream.Close() })
+		defer stop()
 		request := &http.Request{Method: http.MethodConnect, URL: &url.URL{Opaque: target}, Host: target, Header: make(http.Header)}
 		if e = request.Write(stream); e != nil {
 			stream.Close()
@@ -168,20 +171,19 @@ func Start(config Config) (*Client, error) {
 		}
 		reader := bufio.NewReader(stream)
 		response, e := http.ReadResponse(reader, request)
-		if e != nil || response.StatusCode != 200 {
+		if e != nil {
 			stream.Close()
 			return nil, errors.New("protected connection could not reach this service")
+		}
+		if response.StatusCode != http.StatusOK {
+			stream.Close()
+			return nil, &destinationError{response.StatusCode}
 		}
 		stream.SetDeadline(time.Time{})
 		return &bufferedConn{Conn: stream, reader: reader}, nil
 	}
 
-	dial := func(ctx context.Context, networkName, target string) (net.Conn, error) {
-		if !c.fallback.Load() {
-			if stream, e := wgDial(ctx, networkName, target); e == nil {
-				return stream, nil
-			}
-		}
+	httpsDial := func(ctx context.Context, _, target string) (net.Conn, error) {
 		if len(config.RelayID) != 64 || len(config.RelayToken) != 64 {
 			return nil, errors.New("protected connection is unavailable")
 		}
@@ -202,17 +204,33 @@ func Start(config Config) (*Client, error) {
 			if response != nil && response.Body != nil {
 				response.Body.Close()
 			}
+			if response != nil && (response.StatusCode == 403 || response.StatusCode == 502 || response.StatusCode == 503) {
+				return nil, &destinationError{response.StatusCode}
+			}
 			return nil, fmt.Errorf("protected HTTPS connection is unavailable: %w", e)
 		}
-		c.fallback.Store(true)
-		c.dev.Down()
 		return wsstream.New(socket), nil
 	}
+	selectDial := func(primary, secondary dialFunc) dialFunc {
+		return func(ctx context.Context, networkName, target string) (net.Conn, error) {
+			if c.fallback.Load() {
+				return secondary(ctx, networkName, target)
+			}
+			stream, https, err := raceRoute(ctx, primary, secondary, networkName, target, 250*time.Millisecond)
+			if err == nil && https {
+				c.fallback.Store(true)
+			}
+			return stream, err
+		}
+	}
+	dial := selectDial(wgDial, httpsDial)
 	if config.PreferHTTPS {
 		c.fallback.Store(true)
 		c.dev.Down()
 	}
 	c.transport = &http.Transport{DialContext: dial, ForceAttemptHTTP2: true, MaxIdleConns: 6, MaxIdleConnsPerHost: 2, IdleConnTimeout: 45 * time.Second, TLSClientConfig: &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}, TLSHandshakeTimeout: 15 * time.Second, ResponseHeaderTimeout: 20 * time.Second}
+	trust := &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12, NextProtos: []string{"h2", "http/1.1"}}
+	c.transport.DialTLSContext = selectDial(tlsRoute(wgDial, trust), tlsRoute(httpsDial, trust))
 	c.server = &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		expected := "Basic " + base64.StdEncoding.EncodeToString([]byte("paramo1d:"+c.token))
 		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Proxy-Authorization")), []byte(expected)) != 1 {
@@ -301,6 +319,13 @@ func (c *Client) Request(method, target string, body []byte, headers map[string]
 	}
 	client := &http.Client{Transport: c.transport, Timeout: 40 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, e := client.Do(request)
+	var destination *destinationError
+	if e != nil && method == http.MethodGet && c.ctx.Err() == nil && !errors.As(e, &destination) && c.fallback.CompareAndSwap(false, true) {
+		// A connected UDP stream can still stall during TLS. Retry a read over
+		// HTTPS without replaying message publication or transaction submission.
+		c.transport.CloseIdleConnections()
+		response, e = client.Do(request.Clone(c.ctx))
+	}
 	if e != nil {
 		return nil, errors.New("protected connection is unavailable")
 	}

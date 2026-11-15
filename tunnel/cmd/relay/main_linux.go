@@ -42,13 +42,60 @@ type Config struct {
 	Parameters map[string]string `json:"parameters"`
 }
 type Relay struct {
-	mu     sync.Mutex
-	dev    *device.Device
-	config Config
-	public string
-	peers  map[string]Peer
-	state  string
-	slots  chan struct{}
+	mu       sync.Mutex
+	dev      *device.Device
+	config   Config
+	public   string
+	peers    map[string]Peer
+	state    string
+	slots    chan struct{}
+	active   map[string]int
+	maxPeers int
+	perPeer  int
+}
+
+func nextAddress(peers map[string]Peer, wide bool) (string, error) {
+	used := make(map[string]bool, len(peers))
+	for _, peer := range peers {
+		used[peer.Address] = true
+	}
+	first, last := 2, 250
+	if wide {
+		first, last = 257, 65535
+	}
+	for i := first; i < last; i++ {
+		address := fmt.Sprintf("10.80.%d.%d", i/256, i%256)
+		if !used[address] {
+			return address, nil
+		}
+	}
+	return "", errors.New("address capacity reached")
+}
+
+func (r *Relay) acquire(address string) (func(), bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.active[address] >= r.perPeer {
+		return nil, false
+	}
+	select {
+	case r.slots <- struct{}{}:
+		if r.active == nil {
+			r.active = make(map[string]int)
+		}
+		r.active[address]++
+		return func() {
+			r.mu.Lock()
+			r.active[address]--
+			if r.active[address] == 0 {
+				delete(r.active, address)
+			}
+			<-r.slots
+			r.mu.Unlock()
+		}, true
+	default:
+		return nil, false
+	}
 }
 
 func writeJSON(path string, v any) error {
@@ -77,15 +124,20 @@ func (r *Relay) enroll(w http.ResponseWriter, q *http.Request) {
 		return
 	}
 	var request struct {
-		ID        string `json:"id"`
-		Key       string `json:"public_key"`
-		Time      int64  `json:"time_ms"`
-		Signature string `json:"signature"`
+		ID          string `json:"id"`
+		Key         string `json:"public_key"`
+		Time        int64  `json:"time_ms"`
+		Signature   string `json:"signature"`
+		AddressBits int    `json:"address_bits,omitempty"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, q.Body, 8192))
 	decoder.DisallowUnknownFields()
 	if e := decoder.Decode(&request); e != nil {
 		http.Error(w, "Invalid enrollment", 400)
+		return
+	}
+	if request.AddressBits != 0 && request.AddressBits != 24 && request.AddressBits != 16 {
+		http.Error(w, "Unsupported address range", 400)
 		return
 	}
 	id, e := hex.DecodeString(request.ID)
@@ -108,20 +160,14 @@ func (r *Relay) enroll(w http.ResponseWriter, q *http.Request) {
 	defer r.mu.Unlock()
 	peer, exists := r.peers[request.ID]
 	if !exists {
-		if len(r.peers) >= 240 {
+		if len(r.peers) >= r.maxPeers {
 			http.Error(w, "Enrollment capacity reached", 503)
 			return
 		}
-		used := map[string]bool{}
-		for _, p := range r.peers {
-			used[p.Address] = true
-		}
-		for i := 2; i < 250; i++ {
-			a := fmt.Sprintf("10.80.0.%d", i)
-			if !used[a] {
-				peer.Address = a
-				break
-			}
+		peer.Address, e = nextAddress(r.peers, request.AddressBits == 16)
+		if e != nil {
+			http.Error(w, "Enrollment capacity reached", 503)
+			return
 		}
 	}
 	if peer.Key != request.Key {
@@ -176,13 +222,12 @@ func (r *Relay) websocket(w http.ResponseWriter, q *http.Request) {
 		http.Error(w, "Service unavailable on application route", 403)
 		return
 	}
-	select {
-	case r.slots <- struct{}{}:
-		defer func() { <-r.slots }()
-	default:
+	release, admitted := r.acquire(peer.Address)
+	if !admitted {
 		http.Error(w, "Connection limit", 503)
 		return
 	}
+	defer release()
 	remote, e := net.DialTimeout("tcp", destination, 10*time.Second)
 	if e != nil {
 		http.Error(w, "Destination unavailable", 502)
@@ -236,13 +281,17 @@ func (r *Relay) proxy(w http.ResponseWriter, q *http.Request) {
 		http.Error(w, "Service unavailable on application route", 403)
 		return
 	}
-	select {
-	case r.slots <- struct{}{}:
-		defer func() { <-r.slots }()
-	default:
+	address, _, e := net.SplitHostPort(q.RemoteAddr)
+	if e != nil {
+		http.Error(w, "Invalid peer address", 400)
+		return
+	}
+	release, admitted := r.acquire(address)
+	if !admitted {
 		http.Error(w, "Connection limit", 503)
 		return
 	}
+	defer release()
 	remote, e := net.DialTimeout("tcp", destination, 10*time.Second)
 	if e != nil {
 		http.Error(w, "Destination unavailable", 502)
@@ -274,7 +323,13 @@ func publicEndpoint(value string) (string, error) {
 func main() {
 	state := flag.String("state", "/var/lib/paramo1d-tunnel", "Private state directory")
 	endpoint := flag.String("endpoint", "chat.parano1d.org:443", "Public UDP endpoint")
+	maxPeers := flag.Int("max-peers", 4096, "Maximum registered devices")
+	maxStreams := flag.Int("max-streams", 4096, "Maximum concurrent transport streams")
+	perPeer := flag.Int("streams-per-peer", 16, "Concurrent transport streams per device")
 	flag.Parse()
+	if *maxPeers < 1 || *maxPeers > 65278 || *maxStreams < 1 || *maxStreams > 16384 || *perPeer < 1 || *perPeer > *maxStreams {
+		panic("Invalid tunnel capacity")
+	}
 	if e := os.MkdirAll(*state, 0700); e != nil {
 		panic("Cannot open tunnel state")
 	}
@@ -323,6 +378,8 @@ func main() {
 		if json.Unmarshal(b, &peers) != nil {
 			panic("Invalid peer state")
 		}
+	} else if !os.IsNotExist(e) {
+		panic("Cannot read peer state")
 	}
 	for _, peer := range peers {
 		if e = dev.IpcSet("public_key=" + peer.Key + "\nallowed_ip=" + peer.Address + "/32\n"); e != nil {
@@ -332,16 +389,21 @@ func main() {
 	if e = dev.Up(); e != nil {
 		panic("Cannot start tunnel")
 	}
-	for _, args := range [][]string{{"address", "replace", "10.80.0.1/24", "dev", "pmrelay0"}, {"link", "set", "dev", "pmrelay0", "up"}} {
+	for _, args := range [][]string{{"address", "replace", "10.80.0.1/16", "dev", "pmrelay0"}, {"link", "set", "dev", "pmrelay0", "up"}} {
 		if e = exec.Command("ip", args...).Run(); e != nil {
 			panic("Cannot configure tunnel interface")
 		}
 	}
-	relay := &Relay{dev: dev, config: config, public: hex.EncodeToString(key.PublicKey().Bytes()), peers: peers, state: *state, slots: make(chan struct{}, 96)}
+	relay := &Relay{dev: dev, config: config, public: hex.EncodeToString(key.PublicKey().Bytes()), peers: peers, state: *state, slots: make(chan struct{}, *maxStreams), maxPeers: *maxPeers, perPeer: *perPeer, active: make(map[string]int)}
 	api := http.NewServeMux()
 	api.HandleFunc("/v1/tunnel/enroll", relay.enroll)
 	api.HandleFunc("/v1/tunnel/connect", relay.websocket)
-	api.HandleFunc("/healthz", func(w http.ResponseWriter, q *http.Request) { fmt.Fprint(w, "{\"ok\":true}") })
+	api.HandleFunc("/healthz", func(w http.ResponseWriter, q *http.Request) {
+		relay.mu.Lock()
+		defer relay.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"ok": true, "registered_devices": len(relay.peers), "active_streams": len(relay.slots), "stream_limit": cap(relay.slots), "device_limit": relay.maxPeers, "streams_per_device": relay.perPeer})
+	})
 	control := &http.Server{Addr: "127.0.0.1:9713", Handler: api, ReadHeaderTimeout: 8 * time.Second, MaxHeaderBytes: 8192}
 	proxy := &http.Server{Addr: "10.80.0.1:1081", Handler: http.HandlerFunc(relay.proxy), ReadHeaderTimeout: 8 * time.Second, MaxHeaderBytes: 8192}
 	go func() {

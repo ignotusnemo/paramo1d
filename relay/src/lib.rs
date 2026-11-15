@@ -21,8 +21,9 @@ use std::{
 };
 use tokio::sync::{watch, Semaphore};
 
-const MAX_MESSAGES: i64 = 20_000;
-const MAX_STORED_BYTES: i64 = 128 * 1024 * 1024;
+const MAX_MESSAGES: i64 = 200_000;
+const MAX_STORED_BYTES: i64 = 1024 * 1024 * 1024;
+const MAX_SYNC_READERS: usize = 2048;
 const MAX_REPLY_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -80,7 +81,7 @@ impl Relay {
         }
         let db = Connection::open(path)?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
-            PRAGMA max_page_count=49152;
+            PRAGMA max_page_count=393216;
             CREATE TABLE IF NOT EXISTS messages (
               seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
               room TEXT, recipient TEXT, sender TEXT NOT NULL, expires INTEGER NOT NULL,
@@ -95,7 +96,7 @@ impl Relay {
                 rates: HashMap::new(),
             })),
             changes: watch::channel(0).0,
-            readers: Arc::new(Semaphore::new(256)),
+            readers: Arc::new(Semaphore::new(MAX_SYNC_READERS)),
         })
     }
 
@@ -470,6 +471,65 @@ mod tests {
         assert_eq!(page.inbox.messages[0].envelope.id, packet.id);
         assert!(!String::from_utf8_lossy(&bytes).contains("wake without the polling interval"));
     }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn community_delivery_wakes_five_hundred_waiting_clients() {
+        use axum::{body::Body, http::Request};
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().unwrap();
+        let relay = Relay::open(&dir.path().join("messages.db")).unwrap();
+        let app = router(relay.clone());
+        let mut readers = tokio::task::JoinSet::new();
+        for n in 0u64..500 {
+            let mut seed = [0u8; 32];
+            seed[..8].copy_from_slice(&n.to_le_bytes());
+            let id = Identity::from_seed(&seed);
+            let contact = id.contact("Reader".into(), "o1fixture".into()).unwrap();
+            let now = now_ms();
+            let path = format!("/v1/sync/{}?wait_ms=10000", contact.id);
+            let request = Request::get(&path)
+                .header("x-paramo1d-time", now.to_string())
+                .header("x-paramo1d-signature", id.read_authorization(&path, now))
+                .body(Body::empty())
+                .unwrap();
+            readers.spawn(app.clone().oneshot(request));
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while relay.readers.available_permits() != MAX_SYNC_READERS - 500 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("clients did not enter synchronization");
+        let sender = Identity::from_seed(&[17; 32]);
+        let packet = sender
+            .seal(
+                sender.contact("Sender".into(), "o1fixture".into()).unwrap(),
+                Destination::Group { room: LOBBY.into() },
+                Message::Text {
+                    text: "Community delivery fixture".into(),
+                },
+                now_ms(),
+            )
+            .unwrap();
+        relay.publish(packet.clone(), now_ms()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while let Some(response) = readers.join_next().await {
+                let response = response.unwrap().unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let bytes = axum::body::to_bytes(response.into_body(), MAX_REPLY_BYTES)
+                    .await
+                    .unwrap();
+                let page: SyncPage = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(page.group.messages.len(), 1);
+                assert_eq!(page.group.messages[0].envelope.id, packet.id);
+                assert!(page.inbox.messages.is_empty());
+            }
+        })
+        .await
+        .expect("community delivery remained blocked");
+        assert_eq!(relay.readers.available_permits(), MAX_SYNC_READERS);
+    }
+
     #[tokio::test]
     async fn synchronization_releases_idle_waiters_and_bounds_capacity() {
         use axum::{body::Body, http::Request};
@@ -490,7 +550,11 @@ mod tests {
                 .body(Body::empty())
                 .unwrap()
         };
-        let permits = relay.readers.acquire_many(256).await.unwrap();
+        let permits = relay
+            .readers
+            .acquire_many(MAX_SYNC_READERS as u32)
+            .await
+            .unwrap();
         let app = router(relay.clone());
         assert_eq!(
             app.clone().oneshot(request()).await.unwrap().status(),
@@ -503,7 +567,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(relay.readers.available_permits(), 256);
+        assert_eq!(relay.readers.available_permits(), MAX_SYNC_READERS);
     }
     #[test]
     fn queued_messages_survive_restart_deduplicate_and_preserve_cursor() {

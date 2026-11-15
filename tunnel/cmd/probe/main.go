@@ -29,7 +29,7 @@ func main() {
 	clock := time.Now().UnixMilli()
 	path := "/v1/tunnel/" + pair["public_key"]
 	signed := []byte(fmt.Sprintf("Paramo1d/Courier/inbox/1\x00%s\x00%d", path, clock))
-	body, _ := json.Marshal(map[string]any{"id": hex.EncodeToString(signing.Public().(ed25519.PublicKey)), "public_key": pair["public_key"], "time_ms": clock, "signature": hex.EncodeToString(ed25519.Sign(signing, signed))})
+	body, _ := json.Marshal(map[string]any{"id": hex.EncodeToString(signing.Public().(ed25519.PublicKey)), "public_key": pair["public_key"], "time_ms": clock, "signature": hex.EncodeToString(ed25519.Sign(signing, signed)), "address_bits": 16})
 	httpClient := &http.Client{Timeout: 20 * time.Second}
 	response, e := httpClient.Post("https://chat.parano1d.org/v1/tunnel/enroll", "application/json", bytes.NewReader(body))
 	if e != nil {
@@ -45,8 +45,8 @@ func main() {
 	if json.NewDecoder(io.LimitReader(response.Body, 8192)).Decode(&config) != nil {
 		panic("enrollment response invalid")
 	}
-	config.PreferHTTPS = os.Getenv("PARAMO1D_FORCE_HTTPS")=="1"
- config.PrivateKey = pair["private_key"]
+	config.PreferHTTPS = os.Getenv("PARAMO1D_FORCE_HTTPS") == "1"
+	config.PrivateKey = pair["private_key"]
 	token, _ := client.Keypair()
 	config.Token = token["private_key"]
 	tunnel, e := client.Start(config)

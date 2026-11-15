@@ -942,7 +942,8 @@ public final class MainActivity extends Activity {
         core("route_set", new JSONObject().put("port", 65534).put("token", config.getString("token")));
         tunnelStarting = true; tunnelState = new JSONObject().put("enabled", true).put("checking", true);
         JSONObject auth = core("read_auth", new JSONObject().put("path", "/v1/tunnel/" + config.getString("public_key")));
-        JSONObject enrollment = new JSONObject().put("id", data.getJSONObject("profile").getString("id")).put("public_key", config.getString("public_key")).put("time_ms", Long.parseLong(auth.getString("time_ms"))).put("signature", auth.getString("signature"));
+        final long protectionStarted = android.os.SystemClock.elapsedRealtime();
+        JSONObject enrollment = new JSONObject().put("address_bits", 16).put("id", data.getJSONObject("profile").getString("id")).put("public_key", config.getString("public_key")).put("time_ms", Long.parseLong(auth.getString("time_ms"))).put("signature", auth.getString("signature"));
         deliveryWorker.execute(() -> {
             JSONObject result = null; String problem = null;
             try {
@@ -952,12 +953,13 @@ public final class MainActivity extends Activity {
                 result = tunnelCore(new JSONObject().put("op", "status"));
                 if (!protectedRoute) throw new InterruptedException("Connection cancelled");
                 nativeResult(new JSONObject().put("op", "route_set").put("port", result.getInt("proxy_port")).put("token", config.getString("token")));
-            } catch (Exception error) { problem = error.getMessage(); if (BuildConfig.DEBUG) android.util.Log.d("Paramo1dConnection", "Protected route: " + error.getClass().getSimpleName() + ": " + problem); }
+                android.util.Log.i("Paramo1dConnection", "App VPN connected in " + (android.os.SystemClock.elapsedRealtime()-protectionStarted) + " ms via " + result.optString("transport"));
+            } catch (Exception error) { problem = error.getMessage(); android.util.Log.i("Paramo1dConnection", "App VPN connection failed after " + (android.os.SystemClock.elapsedRealtime()-protectionStarted) + " ms: " + error.getClass().getSimpleName()); }
             final JSONObject checked = result; final String failure = problem;
             chatWorker.execute(() -> { try {
                 tunnelStarting = false;
                 if (!protectedRoute) { core("route_set", new JSONObject()); tunnelCore(new JSONObject().put("op", "stop")); tunnelState = new JSONObject().put("enabled", false); publishView(); return; }
-                protectionFailures = failure == null ? 0 : protectionFailures + 1; nextProtectionAttempt = System.currentTimeMillis() + Math.min(60000, 10000L * (1 + protectionFailures)); config.remove("token"); config.remove("root_certificates"); config.remove("network_handle"); data.put("tunnel_config", config); store.save(data);
+                protectionFailures = failure == null ? 0 : protectionFailures + 1; nextProtectionAttempt = System.currentTimeMillis() + Math.min(30000, 1500L * (1 + protectionFailures)); config.remove("token"); config.remove("root_certificates"); config.remove("network_handle"); data.put("tunnel_config", config); store.save(data);
                 tunnelState = new JSONObject().put("enabled", true).put("checking", false).put("connected", failure == null);
                 if (failure == null && checked != null) tunnelState.put("transport", checked.optString("transport"));
                 if (failure != null) tunnelState.put("problem", failure.contains("EPERM") || failure.contains("Binding socket") ? "Your other VPN blocks direct connections. Exclude Paramo1d in its per-app settings, then retry." : "Protected connection could not reach the network. Retry or connect nearby.");
