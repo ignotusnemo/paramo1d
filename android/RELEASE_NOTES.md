@@ -1,8 +1,10 @@
-**Your voice. Your money. Your node.**
+**Speak freely. Own your money. Carry a full node.**
 
-Paramo1d 1.0 puts a full Parano1d blockchain node, a native NOID wallet and an encrypted messenger on your Android phone. Authorize signatureless, post-quantum payments offline. Relay them over Bluetooth mesh. Verify the blockchain and payment receipts with your own node.
+Paramo1d 1.0 puts a full node for the Parano1d post-quantum blockchain, a native NOID wallet and an encrypted messenger on your Android phone. Authorize signatureless, post-quantum payments offline. Relay them over Bluetooth mesh. Verify the blockchain and payment receipts with your own node.
 
 Send, receive and request NOID inside a conversation. Switch to Paranoid mode for a wallet that works directly through mainnet P2P.
+
+Synchronize from scratch and verify the chain from genesis through recursive State proofs. Get your independently verified balance in 20 seconds. Balance updates in 1–2 seconds. All on a budget Android phone.
 
 ### Two wallet modes
 
