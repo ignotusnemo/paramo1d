@@ -1,0 +1,27 @@
+{
+  "v2-large": {
+    "bytes": 360394134,
+    "sha256": "5d14a63576ec0f1d854406beac74e40fd2f9ade3f0b7e577caa8aeea51cf48cd",
+    "statement_digest": "14722e591579b84fcd0d614b130b67d2ca6a6ad21f7b8a02587a9bea146d9efb"
+  },
+  "v2-small": {
+    "bytes": 144282461,
+    "sha256": "a2bad26df8dc7079e27262b249d02225232b29783f327ca4fb5c64609956d2d9",
+    "statement_digest": "2d91d1f21592a31ae49cbd4c48412d6dae156e00a2ad05fd8e7655ba2192147e"
+  },
+  "v21-large": {
+    "bytes": 377285454,
+    "sha256": "4f7c3f357318da926b1e270f5154d8dcdc087db6a5e19ded2a4d38e22ff9a338",
+    "statement_digest": "c2414f0805073208107ffeea5f6b1750b2526fd0861fc3ba0fc5841719edcf03"
+  },
+  "v21-native": {
+    "bytes": 487754497,
+    "sha256": "1668a0f4ad85575d3485f65719389e20ca1faf8959569e9bc68c1341db70dee3",
+    "statement_digest": "5eda4c90bafa56fb81ffc930aad083f2a298ef92844f3f1c5b653ca16cf04668"
+  },
+  "v21-small": {
+    "bytes": 161463859,
+    "sha256": "4b19115447d32e61d373f6ced6a7a3da56e9cb073c95a47ebf4fe740fbed7b61",
+    "statement_digest": "e4bc2541201695dc9f1f3e04f2762e5b2e91a935ae4f92f2f8476e9328a082d4"
+  }
+}

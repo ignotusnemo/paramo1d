@@ -38,6 +38,28 @@ pub struct ArtifactPin {
     pub bytes: usize,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CanonicalMatrixPin {
+    bytes: u64,
+    sha256: String,
+    statement_digest: String,
+}
+
+fn canonical_matrix_pin(name: &str) -> Result<Option<CanonicalMatrixPin>> {
+    #[cfg(feature = "isolated-testnet")]
+    {
+        let _ = name;
+        Ok(None)
+    }
+    #[cfg(not(feature = "isolated-testnet"))]
+    {
+        let mut pins: BTreeMap<String, CanonicalMatrixPin> =
+            serde_json::from_str(include_str!("../profiles/mainnet-matrices.json"))?;
+        Ok(pins.remove(name))
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Profile {
     pub network: String,
@@ -125,6 +147,72 @@ pub fn prepare(source: &Path, destination: &Path) -> Result<serde_json::Value> {
 
 pub fn prepare_caches(directory: &Path, destination: &Path) -> Result<serde_json::Value> {
     prepare_selected_caches(directory, destination, &[])
+}
+
+/// Generate release commitments after fully authenticating every matrix.
+pub fn prepare_matrix_pins(directory: &Path) -> Result<serde_json::Value> {
+    let runtime = Runtime::load(directory, MatrixMode::Streaming)?;
+    let descriptors = v2::Class::ALL
+        .into_iter()
+        .map(|class| {
+            (
+                format!("v2-{}", class_name(class.index())),
+                runtime.previous.bank().config().class(class).shape(),
+                runtime.previous.bank().matrix_digest(class),
+            )
+        })
+        .chain(v21::Class::ALL.into_iter().map(|class| {
+            (
+                format!("v21-{}", class_name(class.index())),
+                runtime.current.bank().config().class(class).shape(),
+                runtime.current.bank().matrix_digest(class),
+            )
+        }));
+    let mut pins = BTreeMap::new();
+    for (name, shape, digest) in descriptors {
+        let input = MatrixReader::open(
+            &directory.join(format!("{name}.field-r1cs")),
+            MAX_MATRIX_BYTES,
+        )?;
+        let length = input.decoded_len()?;
+        let mut bytes = Vec::with_capacity(length as usize);
+        input.take(length + 1).read_to_end(&mut bytes)?;
+        ensure!(bytes.len() as u64 == length, "release matrix length");
+        let sha256 = hex::encode(Sha256::digest(&bytes));
+        let cache = profile()
+            .matrix_caches
+            .get(&name)
+            .cloned()
+            .context("release span cache pin")?;
+        let spans = read_bounded(
+            &directory.join(format!("{name}.spancache")),
+            cache.bytes as u64,
+        )?;
+        let cache_digest = hex::decode(cache.sha256)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("span pin length"))?;
+        let checked = CompactFieldR1cs::open_with_c1_span_cache(
+            bytes.into_boxed_slice(),
+            shape,
+            digest,
+            &spans,
+            cache_digest,
+            || false,
+        )?;
+        ensure!(
+            checked.statement_digest() == digest,
+            "release matrix statement"
+        );
+        pins.insert(
+            name,
+            CanonicalMatrixPin {
+                bytes: length,
+                sha256,
+                statement_digest: hex::encode(digest),
+            },
+        );
+    }
+    Ok(serde_json::to_value(pins)?)
 }
 
 pub fn prepare_selected_caches(
@@ -313,32 +401,70 @@ impl MatrixFile {
         if input.read(&mut [0; 1]).map_err(|_| V2Error::Matrix)? != 0 {
             return Err(V2Error::Matrix);
         }
-        let spans = read_bounded(&self.path.with_extension("spancache"), pin.bytes as u64)
-            .map_err(|_| V2Error::Matrix)?;
-        let hash = hex::decode(&pin.sha256)
+        let name = self
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or(V2Error::Matrix)?;
+        let canonical = canonical_matrix_pin(name).map_err(|_| V2Error::Matrix)?;
+        let cancelled = || {
+            crate::mobile_control::check().is_err() || length > CACHE_BUDGET.load(Ordering::Relaxed)
+        };
+        let relation = Arc::new(if let Some(pin) = canonical {
+            if pin.bytes != length || pin.statement_digest != hex::encode(self.digest) {
+                return Err(V2Error::Matrix);
+            }
+            let hash = hex::decode(pin.sha256)
+                .map_err(|_| V2Error::Matrix)?
+                .try_into()
+                .map_err(|_| V2Error::Matrix)?;
+            // SAFETY: the tuple is compiled from release commitments emitted
+            // only after complete structural authentication of these matrices.
+            unsafe {
+                CompactFieldR1cs::open_release_pinned_canonical(
+                    bytes.into_boxed_slice(),
+                    self.shape,
+                    self.digest,
+                    hash,
+                    cancelled,
+                )
+            }
             .map_err(|_| V2Error::Matrix)?
-            .try_into()
-            .map_err(|_| V2Error::Matrix)?;
-        let relation = Arc::new(
+        } else {
+            let spans = read_bounded(&self.path.with_extension("spancache"), pin.bytes as u64)
+                .map_err(|_| V2Error::Matrix)?;
+            let hash = hex::decode(&pin.sha256)
+                .map_err(|_| V2Error::Matrix)?
+                .try_into()
+                .map_err(|_| V2Error::Matrix)?;
             CompactFieldR1cs::open_with_c1_span_cache(
                 bytes.into_boxed_slice(),
                 self.shape,
                 self.digest,
                 &spans,
                 hash,
-                || {
-                    crate::mobile_control::check().is_err()
-                        || length > CACHE_BUDGET.load(Ordering::Relaxed)
-                },
+                cancelled,
             )
-            .map_err(|_| V2Error::Matrix)?,
-        );
-        cache.bytes += length;
+            .map_err(|_| V2Error::Matrix)?
+        });
+        let retained = relation.resident_heap_payload_len() as u64;
+        while cache.bytes + retained > budget {
+            let Some(at) = cache
+                .entries
+                .iter()
+                .position(|entry| Arc::strong_count(&entry.relation) == 1)
+            else {
+                return Ok(Some(relation));
+            };
+            let entry = cache.entries.remove(at).expect("located evictable matrix");
+            cache.bytes -= entry.bytes;
+        }
+        cache.bytes += retained;
         cache.entries.push_back(CompactEntry {
             path: self.path.clone(),
             digest: self.digest,
             relation: Arc::clone(&relation),
-            bytes: length,
+            bytes: retained,
         });
         Ok(Some(relation))
     }
@@ -671,6 +797,19 @@ mod tests {
                 || false,
             )
             .unwrap();
+            // This commitment is minted from the exact structurally checked
+            // fixture, as the release preflight does for production matrices.
+            let canonical_hash = Sha256::digest(&bytes).into();
+            let pinned = unsafe {
+                CompactFieldR1cs::open_release_pinned_canonical(
+                    bytes.clone().into_boxed_slice(),
+                    shape,
+                    digest,
+                    canonical_hash,
+                    || false,
+                )
+            }
+            .unwrap();
             for (f, a) in [
                 (None, None),
                 (Some(&fresh), None),
@@ -689,7 +828,33 @@ mod tests {
                         .unwrap(),
                     resident.evaluate_matrix_claims_c1(f, a).unwrap()
                 );
+                assert_eq!(
+                    pinned
+                        .evaluate_matrix_claims_c1_cancellable(f, a, &|| false)
+                        .unwrap(),
+                    resident.evaluate_matrix_claims_c1(f, a).unwrap()
+                );
             }
+            assert!(unsafe {
+                CompactFieldR1cs::open_release_pinned_canonical(
+                    bytes.clone().into_boxed_slice(),
+                    shape,
+                    digest,
+                    [0; 32],
+                    || false,
+                )
+            }
+            .is_err());
+            assert!(unsafe {
+                CompactFieldR1cs::open_release_pinned_canonical(
+                    bytes.clone().into_boxed_slice(),
+                    shape,
+                    digest,
+                    canonical_hash,
+                    || true,
+                )
+            }
+            .is_err());
             let calls = std::sync::atomic::AtomicUsize::new(0);
             assert!(compact
                 .evaluate_matrix_claims_c1_cancellable(Some(&fresh), Some(&acc), &|| calls
@@ -717,6 +882,16 @@ mod tests {
             )
             .is_err());
             *bytes.last_mut().unwrap() ^= 1;
+            assert!(unsafe {
+                CompactFieldR1cs::open_release_pinned_canonical(
+                    bytes.clone().into_boxed_slice(),
+                    shape,
+                    digest,
+                    canonical_hash,
+                    || false,
+                )
+            }
+            .is_err());
             assert!(CompactFieldR1cs::open_with_c1_span_cache(
                 bytes.clone().into_boxed_slice(),
                 shape,

@@ -53,7 +53,9 @@ pub fn dispatch(request: &Value) -> Result<Value> {
             crate::artifacts::matrix_cache_budget(0);
             Ok(json!({"trimmed":true}))
         }
-        "node_status" => Ok(json!({"phase":crate::mobile_control::phase(),"renewing_authorization":crate::mobile_control::renewing_authorization()})),
+        "node_status" => Ok(
+            json!({"phase":crate::mobile_control::phase(),"renewing_authorization":crate::mobile_control::renewing_authorization(),"network_wait_ms":crate::mobile_control::network_wait_ms()}),
+        ),
         "node_active" => {
             let active = request["active"]
                 .as_bool()
@@ -175,7 +177,12 @@ pub fn dispatch(request: &Value) -> Result<Value> {
             crate::network_route::set(port, request["token"].as_str().unwrap_or(""))?;
             Ok(json!({"protected":port.is_some()}))
         }
+        "wallet_mode" => {
+            crate::peer_wallet::set_mode(request["enabled"].as_bool().context("Wallet mode")?);
+            Ok(json!({"enabled":request["enabled"]}))
+        }
         "wallet_sync" => crate::mobile_wallet::synchronize(request),
+        "peer_wallet_probe" => crate::peer_wallet::probe(request),
         "payment_preview" => crate::mobile_wallet::prepare(request),
         "payment_authorize" => crate::mobile_wallet::authorize(request),
         "transaction_status" => transaction_status(request),
@@ -187,6 +194,13 @@ pub fn dispatch(request: &Value) -> Result<Value> {
                 preview["txid"].as_str() == Some(text(request, "txid")?),
                 "Payment differs from the inspected transaction"
             );
+            if crate::peer_wallet::enabled(request) {
+                return crate::peer_wallet::broadcast(
+                    request,
+                    hex::decode(text(request, "intent_hex")?)?,
+                    text(request, "txid")?,
+                );
+            }
             let mut rpc = crate::rpc::Rpc::new(text(request, "rpc")?)?;
             let result = match rpc.call("submitTxIntent", json!([text(request, "intent_hex")?])) {
                 Ok(result) => result,
@@ -255,6 +269,9 @@ pub fn inspect_intent(encoded: &str) -> Result<Value> {
 fn transaction_status(request: &Value) -> Result<Value> {
     let txid = text(request, "txid")?;
     decode_array::<32>(txid)?;
+    if crate::peer_wallet::enabled(request) {
+        return crate::peer_wallet::transaction_status(request, txid);
+    }
     let mut rpc = crate::rpc::Rpc::new(text(request, "rpc")?)?;
     let location = rpc.call("getTx", json!([txid]))?;
     if location.is_null() {
@@ -287,9 +304,22 @@ fn transaction_status(request: &Value) -> Result<Value> {
                 == Some(hex::encode(noid_chain::block_header::block_id(&block.header)).as_str()),
         "Receipt block identity mismatch"
     );
+    let result = receipt_for_body(&payload, txid)?.context("Transaction missing from block")?;
+    ensure!(
+        location["tx_position"].as_u64() == result["tx_position"].as_u64(),
+        "Transaction position mismatch"
+    );
+    Ok(result)
+}
+
+pub(crate) fn receipt_for_body(
+    payload: &noid_chain::block::payload::BlockBodyPayload,
+    txid: &str,
+) -> Result<Option<Value>> {
+    let block = payload.block();
     let stream = noid_chain::block::native_assets::validate_scheduled_block_page_stream(
         &block.transactions,
-        height,
+        block.header.height,
     )
     .map_err(|e| anyhow::anyhow!("Block transaction layout rejected: {e}"))?;
     let hashes = stream
@@ -301,16 +331,14 @@ fn transaction_status(request: &Value) -> Result<Value> {
         noid_chain::tx_tree::root_from_hashes(&hashes) == block.header.tx_root,
         "Block transaction commitment mismatch"
     );
-    let (index, group) = stream
+    let Some((index, group)) = stream
         .groups()
         .enumerate()
         .find(|(_, g)| hex::encode(g.logical_txid().0) == txid)
-        .context("Transaction missing from block")?;
+    else {
+        return Ok(None);
+    };
     let position = stream.user_start_index() + index;
-    ensure!(
-        location["tx_position"].as_u64() == Some(position as u64),
-        "Transaction position mismatch"
-    );
     let receipt = noid_chain::consensus::receipt::generate_receipt(
         &block.header,
         &block.transactions[group.body_start..group.body_start + group.page_count],
@@ -321,9 +349,10 @@ fn transaction_status(request: &Value) -> Result<Value> {
         noid_chain::consensus::receipt::verify_merkle_inclusion(&receipt),
         "Collected receipt failed inclusion verification"
     );
-    Ok(
-        json!({"txid":txid,"stage":"included","receipt_hex":hex::encode(receipt.to_bytes()),"height":height,"canonical_verified_locally":false}),
-    )
+    Ok(Some(
+        json!({"txid":txid,"stage":"included","receipt_hex":hex::encode(receipt.to_bytes()),
+        "height":block.header.height,"tx_position":position,"canonical_verified_locally":false}),
+    ))
 }
 
 fn check_receipt(request: &Value) -> Result<Value> {
@@ -400,25 +429,70 @@ pub fn execute(bytes: &[u8]) -> Value {
             ) || bytes.len() <= 2 * 1024 * 1024,
             "Application request exceeds message limit"
         );
-        if matches!(
-            request["op"].as_str(),
-            Some(
-                "wallet_sync"
-                    | "sync_once"
-                    | "payment_preview"
-                    | "payment_authorize"
-                    | "receipt_check"
-            )
-        ) {
-            crate::mobile_control::run(|| dispatch(&request))
-        } else {
-            dispatch(&request)
-        }
+        crate::wallet_checkpoint::with_identity(&request, || {
+            crate::peer_wallet::with_policy(crate::peer_wallet::enabled(&request), || {
+                if matches!(
+                    request["op"].as_str(),
+                    Some(
+                        "wallet_sync"
+                            | "sync_once"
+                            | "payment_preview"
+                            | "payment_authorize"
+                            | "receipt_check"
+                    )
+                ) || crate::peer_wallet::enabled(&request)
+                    && matches!(
+                        request["op"].as_str(),
+                        Some("broadcast_send" | "transaction_status" | "peer_wallet_probe")
+                    )
+                {
+                    crate::mobile_control::run(|| dispatch(&request))
+                } else {
+                    dispatch(&request)
+                }
+            })
+        })
     })();
     match result {
         Ok(value) => json!({"ok":true,"result":value}),
-        Err(error) => json!({"ok":false,"error":error.to_string()}),
+        Err(error) => {
+            json!({"ok":false,"error":error.to_string(),"network_unavailable":connection_problem(&error)})
+        }
     }
+}
+
+fn connection_problem(error: &anyhow::Error) -> bool {
+    if error.to_string().contains("Wallet check paused") {
+        return false;
+    }
+    error.chain().any(|cause| {
+        if let Some(error) = cause.downcast_ref::<reqwest::Error>() {
+            return error.is_connect() || error.is_timeout();
+        }
+        if cause.is::<tokio::time::error::Elapsed>() {
+            return true;
+        }
+        if let Some(error) = cause.downcast_ref::<std::io::Error>() {
+            return matches!(
+                error.kind(),
+                std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::NotConnected
+                    | std::io::ErrorKind::NetworkUnreachable
+                    | std::io::ErrorKind::HostUnreachable
+            );
+        }
+        if let Some(error) = cause.downcast_ref::<libp2p::request_response::OutboundFailure>() {
+            return matches!(
+                error,
+                libp2p::request_response::OutboundFailure::Timeout
+                    | libp2p::request_response::OutboundFailure::DialFailure
+                    | libp2p::request_response::OutboundFailure::ConnectionClosed
+            );
+        }
+        false
+    })
 }
 
 /// The caller owns the returned JSON and frees it through paramo1d_free_json.
@@ -475,4 +549,29 @@ pub fn accepted_bundle(directory: &Path) -> Result<PathBuf> {
         "Invalid accepted bundle location"
     );
     Ok(directory.join(name))
+}
+
+#[cfg(test)]
+mod transport_classification_tests {
+    use super::*;
+    #[test]
+    fn network_hints_exclude_proof_errors_cancellation_and_protocol_mismatch() {
+        assert!(connection_problem(
+            &std::io::Error::from(std::io::ErrorKind::TimedOut).into()
+        ));
+        assert!(connection_problem(
+            &anyhow::Error::new(libp2p::request_response::OutboundFailure::DialFailure)
+                .context("header transfer")
+        ));
+        assert!(!connection_problem(&anyhow::anyhow!(
+            "Slot proof root mismatch"
+        )));
+        assert!(!connection_problem(&anyhow::anyhow!("Wallet check paused")));
+        assert!(!connection_problem(&anyhow::Error::new(
+            libp2p::request_response::OutboundFailure::UnsupportedProtocols
+        )));
+        assert!(!connection_problem(
+            &std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into()
+        ));
+    }
 }

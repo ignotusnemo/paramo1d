@@ -1,43 +1,91 @@
 # Paramo1d
 
-**A full Parano1d node, native NOID wallet and encrypted messenger for Android.**
+**Your voice. Your money. Your node.**
 
-Send, receive and request NOID directly inside a chat. Your phone holds the spending secret, authorizes payments and verifies the blockchain. Connect through ordinary internet, turn on the built-in protected connection, or exchange messages and authorized payments with nearby participants over Bluetooth.
+A full Parano1d blockchain node, native NOID wallet and encrypted messenger for Android. Send, receive and request NOID inside a conversation. Authorize signatureless, post-quantum payments offline. Relay them over Bluetooth mesh. Verify the blockchain and payment receipts with your own node.
 
-Reply to messages, react with emoji, copy text and share contact cards. Each conversation keeps its own encrypted draft. Pixel warrior avatars are generated on the device from each messaging identity.
+[Download Android](https://github.com/ignotusnemo/paramo1d/releases/latest) · [Release notes](android/RELEASE_NOTES.md) · [Android documentation](android/README.md)
 
-## Inside the app
+## Two wallet modes
 
-- **A blockchain node on your phone.** Connect directly to mainnet peers and independently verify the chain, recursive State proofs and payment receipts.
-- **NOID payments in your conversations.** Send NOID, share a receiving address, request an amount with a memo and check the returned payment receipt.
-- **One public community and encrypted private chats.** Share contact links or QR codes and receive messages in the background.
-- **Ordinary internet.** Chat, synchronize the node and deliver payments through your normal mobile or Wi-Fi connection.
-- **Built-in App VPN.** Use an app-only AmneziaWG protected channel with authenticated HTTPS fallback. Other applications keep their own connection.
-- **Bluetooth without internet.** Exchange encrypted messages, already-authorized payment packets and receipts with nearby participants.
-- **Community-assisted payment delivery.** Authorize a payment from your saved verified wallet view. A connected participant can forward it to the network. The spending secret stays on your phone.
-- **Local access and recovery.** Fingerprint or screen-lock entry, encrypted portable backups and light, dark or system appearance.
+Your phone verifies the blockchain in both modes.
 
-Payments settle on the Parano1d network. Bluetooth carries the authorization and receipt between participants. Your own node checks the receipt against its accepted chain.
+| | Normal mode | Paranoid mode |
+| --- | --- | --- |
+| Blockchain and State proof verification | On the phone | On the phone |
+| Coin discovery and slot-proof delivery | Configurable RPC service | Mainnet P2P |
+| Payment broadcast and receipt retrieval | Configurable RPC service | Mainnet P2P |
+| Wallet RPC | Available | Disabled |
+| Community chat | Available | Paused |
+| Encrypted private messages | Available | Available |
+| Interface | Green | Orange |
+
+The mechanical Paranoid mode switch gives a short vibration and changes the interface from green to orange. Private chats and the wallet stay available. Switching back restores Community and its saved history.
+
+## Internet, App VPN and Bluetooth
+
+- **Ordinary internet.** Use mobile data or Wi-Fi for messaging, synchronization and payment delivery.
+- **Built-in App VPN.** An app-only AmneziaWG protected channel with authenticated HTTPS fallback. Other applications keep their own connection.
+- **Bluetooth mesh without internet.** Exchange messages, authorized payment packets and receipts with nearby participants. Connected devices can carry and forward encrypted packets for another contact.
+
+Bluetooth and internet deliver in parallel, with message IDs preventing duplicates. Connections, App VPN and Paranoid mode have separate controls in the header. Stalled wallet requests trigger an App VPN suggestion in either mode. Switching the connection resumes the balance check through the selected route.
+
+## Payments inside conversations
+
+Send NOID, share a receiving address or request an amount with a memo. Scan a receiving QR code directly from the Send form. Review the recipient, amount and network fee before authorizing the payment.
+
+Prepare an offline payment from the wallet's saved, verified State and pass the authorization over Bluetooth. A connected recipient or community participant forwards the packet to the network. The spending secret stays with the sender. Payment cards track delivery. The phone verifies returned inclusion receipts against its own accepted chain.
+
+Payments settle on the Parano1d network using its signatureless, post-quantum Owner authorization. The wallet checks transaction-epoch freshness. Expired packets offer **Review fresh payment** to the sender.
+
+## Conversations and contacts
+
+- One public community and end-to-end encrypted private conversations.
+- Replies with a jump to the original message, emoji reactions, copy and text selection.
+- Search, saved drafts, unread counters and background message delivery.
+- Verified contact cards with Copy link, Add contact and Message actions.
+- Contact QR codes and an in-app scanner for adding contacts.
+- Pixel warrior avatars generated locally from messaging identities.
+- Floating conversation controls, composer and navigation. Light, dark and system themes.
+- Separate cleanup for Community and selected private chats. Storage usage and a chooser when storage fills up.
+- **Delete chat** removes its message history and contact from this phone. A new incoming message can start a new conversation.
+
+Private-message encryption uses X25519 and XSalsa20-Poly1305. Ed25519 authenticates message envelopes and contact cards. Community messages and on-chain NOID payments are public.
+
+## Performance on an everyday phone
+
+Measured on a **Redmi 15C with 4 GB RAM**, Android 15:
+
+| Operation | Observed time |
+| --- | ---: |
+| Ordinary-mode balance check with unchanged coins | **1.36 s** |
+| Subsequent P2P wallet watches with unchanged coins | **0.82–1.50 s** |
+| Full P2P wallet recovery after a 90-block gap | **37.55 s** |
+| Full repeat verification of a Small recursive State proof | **2.50 s** |
+| First Small recursive State proof verification | **11.69 s** |
+| Native recursive State proof verification | **7.15 s** |
+
+P2P recovery over mobile data through App VPN restored the wallet and verified the new State with **zero wallet RPC requests**. Complete local verification of a public mainnet bundle, including the header prefix and fork origins, took **23.54 seconds**. Peak verifier memory was approximately **733 MiB**.
+
+## The node and wallet
+
+The node retrieves headers and recursive proofs over Parano1d P2P. It verifies the header chain from genesis, proof of work, fork certificates and the recursive State proof on the device. Accepted State roots authenticate wallet inputs and payment receipts.
+
+The default wallet checks RPC slot proofs against its independently verified State root. Paranoid mode verifies a complete sparse State snapshot for initial discovery, then retains its ordinary NOID coins and an empty-slot reserve. Short updates consume the complete ordered block bodies and check their transaction commitments. A recursive State proof authenticates the accepted extension before the updated wallet view is saved.
+
+Verified header prefixes and wallet checkpoints carry local authentication tags bound to the wallet identity and released verification profile. Release-pinned canonical matrix commitments speed parameter loading. Checked immutable parameters stay in a bounded memory cache.
+
+Adaptive checks watch for changes to the wallet's coins. Changed inputs and transaction epochs trigger State verification. While the app is open and unlocked, funded wallets renew payment readiness in the background. The node pauses when the application is minimized or the screen is locked. Background message delivery is on by default and continues independently.
+
+## Local access and recovery
+
+Fingerprint or the phone's screen lock protects entry. Android Keystore protects the encrypted local archive. Portable backups use Argon2id and XChaCha20-Poly1305. Save an encrypted backup and keep its password separately. Screenshots and screen recordings are available through an explicit setting.
 
 ## Install
 
 Download the ARM64 APK from [Releases](https://github.com/ignotusnemo/paramo1d/releases/latest). Android 8.0 or later and ARM64 hardware with AES and PMULL are required. The APK includes the mainnet verification parameters.
 
-Release downloads include APK hashes and the public signing-certificate fingerprint. Updates use the same release signing key.
-
-## The node and wallet
-
-The node retrieves headers and recursive proofs over Parano1d P2P. It checks the header chain from genesis, proof of work, fork certificates and the recursive State proof on the device. Its accepted chain and State roots authenticate wallet inputs and payment receipts.
-
-The wallet uses a configurable RPC endpoint for coin discovery, slot-proof delivery and transaction submission. It checks returned slot proofs against its independently verified State root. Internet chats use configurable delivery relays. These services provide data and delivery. Payment authorization and blockchain verification run on the phone.
-
-Direct messages use X25519 and XSalsa20-Poly1305. NOID payments use Parano1d's post-quantum Owner authorization protocol. The community chat and blockchain payments are public.
-
-While the app is open and unlocked, small queries watch for changes to the wallet's coins. Changed coins trigger State and membership verification. The node stops when the app is minimized or locked. Background message delivery continues independently.
-
-On a Redmi 15C with 4 GB RAM, new Small and Native proofs took 5.042 and 5.635 seconds with authenticated parameters retained in memory. The first complete bundle check took 49.877 seconds after opening the parameter runtime. The [device report](android/reports/redmi-15c-2026-11-10.md) records the conditions, cold-start costs, mainnet payment and actual Bluetooth checks.
-
-[Android usage and build instructions](android/README.md) · [Command-line verifier measurements](docs/verifier-benchmarks.md)
+Official release APKs use the same signing certificate, so updates preserve the wallet, chats and settings. Downloads include `SHA256SUMS` and `SIGNING-CERTIFICATE.txt`.
 
 ## Build Android
 
@@ -56,7 +104,7 @@ python3 scripts/build-courier.py \
 
 The development APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`. Release builds use `--variant release` and the signing environment described in the Android documentation.
 
-The [Android workflow](.github/workflows/android.yml) runs the tests and builds an APK. A version tag builds a signed release and publishes it after the checks pass.
+The [Android workflow](.github/workflows/android.yml) runs the checks and builds an APK. A version tag builds a signed release and publishes it after the checks pass.
 
 ## Command-line client
 
@@ -65,7 +113,7 @@ cargo build --locked --release
 paramo1d run --artifacts ./artifacts --data-dir ./mainnet
 ```
 
-The client discovers mainnet peers through DNS seeds. `--once` performs one synchronization pass. `mainnet/accepted.json` records the accepted height, block hash, State root and measurements.
+The client discovers mainnet peers through DNS seeds. `--once` performs one synchronization pass. `mainnet/accepted.json` records the accepted height, block hash and State root.
 
 For offline verification, export a public proof bundle from a node database opened in read-only mode:
 

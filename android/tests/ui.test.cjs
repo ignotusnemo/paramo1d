@@ -22,7 +22,7 @@ async function bridge(page) {
     const alice = { id: '11'.repeat(32), box_key: 'aa'.repeat(32), name: 'Alice', address: 'o1fixture-alice' };
     const bob = { id: '22'.repeat(32), box_key: 'bb'.repeat(32), name: 'Bob', address: 'o1fixture-bob' };
     const txid = 'ab'.repeat(32);
-    const state = { profile: alice, invite: 'paramo1d://contact/test-view-fixture', contacts: [bob], rooms: ['parano1d'], settings: { relays: ['https://relay.example'], rpc: 'https://node.example/rpc' }, chain: {}, security: { available: true, enabled: true }, paranoid_mode:true,background_delivery:true,delivery_running:true,backup_saved: false, connection: { online: true }, receipts: [], observations: [], messages: [] };
+    const state = { profile: alice, invite: 'paramo1d://contact/test-view-fixture', contacts: [bob], rooms: ['parano1d'], settings: { relays: ['https://relay.example'], rpc: 'https://node.example/rpc' }, chain: {}, security: { available: true, enabled: true }, paranoid_mode:false,background_delivery:true,delivery_running:true,backup_saved: false, connection: { online: true }, receipts: [], observations: [], messages: [] };
     state.messages.push({ id: 'hello', chat: 'g:parano1d', sender: bob, message: { type: 'text', text: 'Good morning, everyone. Who is building today?' }, created_ms: now - 180000, status: 'received' });
     state.messages.push({ id: 'payment', chat: 'g:parano1d', sender: alice, message: { type: 'transaction', intent_hex: '00' }, payment: { txid }, created_ms: now - 120000, status: 'sent' });
     state.observations.push({ id: 'status', chat: 'g:parano1d', sender: bob, message: { type: 'relay_update', txid, stage: 'included', receipt_hex: '00' }, created_ms: now - 60000 });
@@ -121,6 +121,25 @@ async function main() {
     assert.equal(await page.locator('.transaction-card.verified').count(), 0, 'A helper report must not become local verification');
     assert.equal(await page.locator('body').evaluate((body) => body.scrollWidth <= window.innerWidth), true, 'Mobile view must fit the viewport');
     await page.screenshot({ path: path.join(output, 'community-mobile.png') });
+    const mode = page.getByRole('switch', { name: 'Paranoid mode', exact: true });
+    assert.equal(await mode.getAttribute('aria-checked'), 'false');
+    assert.equal(await page.locator('.masthead .brand-logo').count(), 0, 'The header gives its space to connection controls');
+    await mode.click();
+    await page.waitForFunction(() => document.documentElement.dataset.paranoid === 'true');
+    assert.equal(await mode.getAttribute('aria-checked'), 'true');
+    assert.equal(await page.locator('html').evaluate(node => getComputedStyle(node).getPropertyValue('--green').trim()), '#ff9b36');
+    assert.equal(await page.locator('.connection').isVisible(), true, 'Paranoid wallet mode preserves chat connection controls');
+    await page.waitForFunction(() => !document.body.classList.contains('mode-shift'));
+    assert.equal(await page.locator('[data-tab="groups"]:visible').count(),0,'Paranoid mode removes public chat navigation');
+    assert.equal(await page.locator('[data-tab="direct"].active:visible').count(),1,'Enabling the mode opens private messages');
+    assert.equal(await page.locator('#welcome-group').isVisible(),false);
+    await page.screenshot({ path: path.join(output, 'paranoid-private-mobile.png') });
+    await mode.click();
+    await page.waitForFunction(() => document.documentElement.dataset.paranoid === 'false');
+    assert.equal(await mode.getAttribute('aria-checked'), 'false');
+    await page.waitForFunction(() => !document.body.classList.contains('mode-shift'));
+    await page.locator('.mobile-tabs [data-tab="groups"]').click();
+
     await page.getByRole('button', { name: 'Check payment' }).click();
     await page.getByText('Payment verified.', { exact: true }).waitFor();
     assert.equal(await page.locator('.transaction-card.verified').count(), 1);
@@ -172,10 +191,11 @@ async function main() {
     assert(await page.locator('#connection').innerText().then(s => s.includes('Connect')), 'The connection action needs a visible label');
     await page.locator('#connection').click();
     await page.getByText('You are online', { exact: true }).waitFor();
-    const vpn = page.getByRole('switch', { name: 'App VPN', exact: true });
+    const vpn = page.locator('#modal').getByRole('switch', { name: 'App VPN', exact: true });
     assert.equal(await vpn.getAttribute('aria-checked'), 'false');
     await vpn.click(); await page.getByText('On · connected', { exact: true }).waitFor();
     assert.equal(await vpn.getAttribute('aria-checked'), 'true');
+    assert.equal(await page.locator('#vpn-switch').getAttribute('data-status'), 'connected');
     await vpn.click(); await page.getByText('Off · using your normal connection', { exact: true }).waitFor();
     const bt = page.getByRole('switch', { name: 'Bluetooth messaging', exact: true });
     await bt.click(); await page.getByText('On · no phone connected yet', { exact: true }).waitFor();
@@ -184,6 +204,10 @@ async function main() {
     await page.screenshot({ path: path.join(output, 'connections-mobile.png') });
     await bt.click();
     assert.equal(await page.evaluate(() => window.paramo1dBack()), true, 'Back closes the connection panel');
+    await page.locator('#vpn-switch').click();
+    await page.waitForFunction(() => document.getElementById('vpn-switch').dataset.status === 'connected');
+    await page.locator('#vpn-switch').click();
+    await page.waitForFunction(() => document.getElementById('vpn-switch').getAttribute('aria-checked') === 'false');
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
     await page.getByLabel('Appearance').selectOption('dark');
     await page.waitForFunction(() => document.documentElement.dataset.theme === 'dark');
@@ -249,7 +273,7 @@ async function main() {
     await page.locator('#close-modal').click();
     await page.getByRole('button', { name: 'Settings', exact: true }).click();
     await page.getByRole('switch', { name: 'App lock', exact: true }).waitFor();
-    assert.equal(await page.getByRole('switch',{name:'Paranoid mode',exact:true}).count(),0);
+    assert.equal(await page.getByRole('switch',{name:'Paranoid mode',exact:true}).count(),1);
     await page.getByText('Automatic wallet updates',{exact:true}).waitFor();
     assert.equal(await page.getByRole('switch',{name:'Receive with screen off',exact:true}).getAttribute('aria-checked'),'true');
     assert.equal(await page.getByText('Delivery relays · one HTTPS address per line', { exact: true }).isVisible(), false);

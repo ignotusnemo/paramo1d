@@ -63,8 +63,10 @@ public final class MainActivity extends Activity {
     private static final Set<String> sendingPayments = new HashSet<>();
     private static boolean deliveryBusy;
     private static boolean inboxBusy;
+    private static final ConnectionAdvisor connectionAdvisor = new ConnectionAdvisor();
     private static long nextInboxAttempt;
     private static long connectionGeneration;
+    private static volatile boolean publicChatEnabled = true;
     private static volatile boolean visible;
     private static String activeConversation = "";
     private static boolean paymentFlow;
@@ -72,6 +74,8 @@ public final class MainActivity extends Activity {
     private static long nextNodeAttempt;
     private static PendingChain pendingChain;
     private static PendingChain pendingRefresh;
+    private static String activeChainOperation = "";
+    private static boolean restartingWalletRoute;
     private final android.os.Handler nodeTimer = new android.os.Handler(android.os.Looper.getMainLooper());
     private final android.content.BroadcastReceiver screenOff = new android.content.BroadcastReceiver() {
         @Override public void onReceive(android.content.Context context, Intent intent) { pauseNode(); }
@@ -84,9 +88,9 @@ public final class MainActivity extends Activity {
         @Override public void run() {
             if (!nodeAllowed()) { pauseNode(); return; }
             try { chatWorker.execute(() -> { try {
-                if (data==null || !data.has("seed_hex") || data.getJSONObject("chain").optBoolean("running") || pendingChain!=null || paymentFlow || System.currentTimeMillis()<nextNodeAttempt || !nodeAllowed() || data.getJSONObject("settings").optString("rpc").isEmpty()) return;
-                if(!data.getJSONObject("chain").has("height") && !walletVisible) return;
-                if (data.optBoolean("protected_route") && !protectedRoute) return;
+                if (data==null || !data.has("seed_hex") || data.getJSONObject("chain").optBoolean("running") || pendingChain!=null || paymentFlow || System.currentTimeMillis()<nextNodeAttempt || !nodeAllowed() || !data.optBoolean("paranoid_mode") && data.getJSONObject("settings").optString("rpc").isEmpty()) return;
+                if(!data.getJSONObject("chain").has("height") && !walletVisible && !data.optBoolean("paranoid_mode")) return;
+                if (data.optBoolean("protected_route") && (!protectedRoute || tunnelStarting || !tunnelState.optBoolean("connected"))) return;
                 startChainAction(null,new JSONObject().put("op","sync"),true);
             } catch(Exception ignored) {} }); } catch(RuntimeException ignored) {}
             nodeTimer.postDelayed(this,3000);
@@ -95,6 +99,7 @@ public final class MainActivity extends Activity {
     private static final android.os.Handler deliveryTimer = new android.os.Handler(android.os.Looper.getMainLooper());
     private static volatile boolean protectedRoute;
     private static boolean tunnelStarting;
+    private static boolean pendingProtection;
     private static long nextProtectionAttempt;
     private static int protectionFailures;
     private static JSONObject tunnelState = new JSONObject();
@@ -104,6 +109,7 @@ public final class MainActivity extends Activity {
         super.onCreate(bundle);
         active = new java.lang.ref.WeakReference<>(this);
         application = getApplicationContext();
+        connectionAdvisor.suppressUntil(application.getSharedPreferences("interface",MODE_PRIVATE).getLong("vpn_hint_until",0));
         appLock = new AppLock(this);
         applySystemTheme(getSharedPreferences("interface",MODE_PRIVATE).getString("theme","system"));
         applyCapturePolicy();
@@ -287,6 +293,10 @@ public final class MainActivity extends Activity {
         if (!data.has("drafts")) data.put("drafts", new JSONObject());
         if (!data.has("chain")) data.put("chain", new JSONObject());
         if (!data.has("background_delivery")) data.put("background_delivery",true);
+        if (!data.has("paranoid_mode")) data.put("paranoid_mode",false);
+        publicChatEnabled = !data.optBoolean("paranoid_mode");
+        nativeResult(new JSONObject().put("op","wallet_mode").put("enabled",data.optBoolean("paranoid_mode")));
+        logWalletMetrics("Saved P2P check");
         data.put("connection", new JSONObject().put("online", false));
         data.getJSONObject("chain").put("running", false);
         if (data.has("seed_hex") && (data.optBoolean("background_delivery") || data.optBoolean("protected_route")) && !DeliveryService.isRunning()) {
@@ -302,24 +312,34 @@ public final class MainActivity extends Activity {
     private static JSONObject view() throws Exception {
         JSONObject result = new JSONObject();
         for (String key : new String[]{"profile", "invite", "contacts", "messages", "receipts", "settings", "chain", "connection", "observations", "drafts"}) if (data.has(key)) result.put(key, data.get(key));
+        result.put("messages",ChatPolicy.messages(data.getJSONArray("messages"),!publicChatEnabled));
+        result.put("observations",ChatPolicy.messages(data.getJSONArray("observations"),!publicChatEnabled));
         JSONArray pending = new JSONArray(), packets = data.getJSONArray("prepared_payments");
         for (int i = 0; i < packets.length(); i++) { JSONObject packet = packets.getJSONObject(i), entry = new JSONObject(); for (String key : new String[]{"txid", "to", "amount", "fee", "submitted", "created_ms", "delivery_error", "chat", "invoice_id", "valid_through_height", "replaced_by"}) if (packet.has(key)) entry.put(key, packet.get(key)); pending.put(entry); }
         result.put("prepared_payments", pending);
+        result.put("paranoid_mode",data.optBoolean("paranoid_mode"));
         result.put("nearby", NearbyService.snapshot());
+        long now=System.currentTimeMillis();
+        JSONObject node=data.has("seed_hex")?nativeResult(new JSONObject().put("op","node_status")):new JSONObject();
+        if(data.has("seed_hex")) result.put("node",node);
+        connectionAdvisor.walletWaiting(now,data.getJSONObject("chain").optBoolean("running")?node.optLong("network_wait_ms",0):0);
+        boolean vpn=tunnelState.optBoolean("enabled")||tunnelState.optBoolean("checking")||tunnelState.optBoolean("connected");
+        JSONArray nearbyPeers=result.getJSONObject("nearby").optJSONArray("peers");
+        String hint=connectionAdvisor.recommendation(now,hasInternet(),vpn,nearbyPeers!=null&&nearbyPeers.length()>0);
+        result.put("network_help",new JSONObject().put("recommend_vpn",!hint.isEmpty()).put("issue",connectionAdvisor.issue(now)).put("id",hint.isEmpty()?"":connectionAdvisor.id(hint)));
         result.put("protection", tunnelState);
         result.put("background_delivery", data.optBoolean("background_delivery",true) || data.optBoolean("protected_route"));
         result.put("delivery_running", DeliveryService.isRunning());
-        if(data.has("seed_hex")) result.put("node",nativeResult(new JSONObject().put("op","node_status")));
         result.put("security", AppLock.state(application));
         result.put("allow_screenshots", application.getSharedPreferences("interface", MODE_PRIVATE).getBoolean("allow_screenshots", false));
         result.put("backup_saved", data.optLong("backup_saved_ms") > 0);
         result.put("storage_full", data.optBoolean("storage_full") || data.getJSONArray("messages").length() >= ChatHistory.MAX_MESSAGES || store.isFull());
         result.put("notifications_enabled", application.getSystemService(android.app.NotificationManager.class).areNotificationsEnabled());
-        JSONObject unread = new JSONObject(), read = data.getJSONObject("read_messages"); JSONArray history = data.getJSONArray("messages"); String own = data.optJSONObject("profile") == null ? "" : data.getJSONObject("profile").getString("id");
+        JSONObject unread = new JSONObject(), read = data.getJSONObject("read_messages"); JSONArray history = result.getJSONArray("messages"); String own = data.optJSONObject("profile") == null ? "" : data.getJSONObject("profile").getString("id");
         for (int i = 0; i < history.length(); i++) { JSONObject message = history.getJSONObject(i); String scope = message.getString("chat"); if (message.getString("id").equals(read.optString(scope))) unread.put(scope,0); else if (!message.getJSONObject("sender").getString("id").equals(own)) unread.put(scope, unread.optInt(scope) + 1); }
         result.put("unread", unread);
         result.put("connection", new JSONObject(data.optJSONObject("connection").toString()).put("checking", inboxBusy && !data.getJSONObject("connection").optBoolean("online")));
-        return result.put("rooms", new JSONArray().put("parano1d"));
+        return result.put("rooms", publicChatEnabled ? new JSONArray().put("parano1d") : new JSONArray());
     }
     private static void requireIdentity() throws Exception { if (!data.has("seed_hex")) throw new Exception("Create or restore your identity first"); }
     private static JSONObject core(String op, JSONObject args) throws Exception {
@@ -328,9 +348,45 @@ public final class MainActivity extends Activity {
         args.put("now_ms", System.currentTimeMillis());
         return nativeResult(args);
     }
+    private static final class NativeFailure extends Exception {
+        final boolean network;
+        NativeFailure(String message, boolean network) {super(message);this.network=network;}
+    }
+    private static boolean transportFailure(Throwable error) {
+        for(Throwable cause=error;cause!=null;cause=cause.getCause()) {
+            if(cause instanceof javax.net.ssl.SSLPeerUnverifiedException || cause instanceof java.security.cert.CertificateException || cause instanceof java.security.cert.CertPathValidatorException) return false;
+        }
+        for(int depth=0;error!=null&&depth<8;depth++,error=error.getCause()) {
+            if(error instanceof NativeFailure && ((NativeFailure)error).network) return true;
+            if(error instanceof java.net.SocketTimeoutException || error instanceof java.net.ConnectException || error instanceof java.net.UnknownHostException || error instanceof java.net.NoRouteToHostException) return true;
+            if(error instanceof javax.net.ssl.SSLException) return true;
+            if(error instanceof java.net.SocketException && String.valueOf(error.getMessage()).matches("(?i).*(reset|unreachable|timed out|refused).*")) return true;
+        }
+        return false;
+    }
+    private static boolean hasInternet() {
+        if(data!=null&&data.optJSONObject("connection")!=null&&data.optJSONObject("connection").optBoolean("online")) return true;
+        try {
+            android.net.ConnectivityManager manager=application.getSystemService(android.net.ConnectivityManager.class);
+            android.net.NetworkCapabilities caps=manager.getNetworkCapabilities(manager.getActiveNetwork());
+            return caps!=null&&caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)&&caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+        } catch(Exception unavailable){return false;}
+    }
+    private static void logWalletMetrics(String label) {
+        try {
+            File file=new File(application.getFilesDir(),"chain/p2p-metrics.json");
+            if(!file.isFile()||file.length()>16384)return;
+            JSONObject metrics=new JSONObject(new String(java.nio.file.Files.readAllBytes(file.toPath()),StandardCharsets.UTF_8));
+            JSONObject safe=new JSONObject();
+            for(String key:new String[]{"height","bootstrap_live_slots","retained_wallet_slots","elapsed_ms","chain_check_ms","snapshot_ms","header_ms","origin_ms","proof_ms","proof_class","applied_blocks","cached_wallet_height","reused_wallet_view","rpc_requests","runtime_load_ms","resume_ms","discovery_ms","transfer_ms","data_before_proof"}) {
+                Object value=metrics.opt(key);if(value instanceof Number||value instanceof Boolean)safe.put(key,value);
+            }
+            android.util.Log.i("Paramo1dWallet",label+": "+safe);
+        }catch(Exception unavailable){}
+    }
     private static JSONObject nativeResult(JSONObject args) throws Exception {
         JSONObject result = new JSONObject(NativeCore.call(args.toString()));
-        if (!result.optBoolean("ok")) throw new Exception(result.optString("error", "Native operation failed"));
+        if (!result.optBoolean("ok")) throw new NativeFailure(result.optString("error", "Native operation failed"),result.optBoolean("network_unavailable"));
         return result.getJSONObject("result");
     }
     private static String randomHex(int count) { byte[] bytes = new byte[count]; new SecureRandom().nextBytes(bytes); StringBuilder s = new StringBuilder(); for (byte b : bytes) s.append(String.format(java.util.Locale.ROOT, "%02x", b & 255)); return s.toString(); }
@@ -430,6 +486,29 @@ public final class MainActivity extends Activity {
                 if (found) getSystemService(android.app.NotificationManager.class).cancel(1000 + Math.floorMod(scope.hashCode(),1000000));
                 return view();
             }
+            case "paranoid_mode": {
+                requireIdentity();
+                boolean enabled=request.getBoolean("enabled");
+                if(enabled==data.optBoolean("paranoid_mode")) return view();
+                if(paymentFlow || data.getJSONObject("chain").optBoolean("running") && !data.getJSONObject("chain").optBoolean("automatic")) throw new Exception("Finish the current wallet operation before changing mode.");
+                nativeResult(new JSONObject().put("op","wallet_mode").put("enabled",enabled));
+                data.put("paranoid_mode",enabled);data.remove("pending_review");
+                publicChatEnabled=!enabled;connectionGeneration++;nextInboxAttempt=0;
+                directClient.dispatcher().cancelAll();
+                data.getJSONObject("chain").put("mode_pending",enabled);
+                nodeControl(false);nextNodeAttempt=0;store.save(data);
+                paranoidModeHaptic();
+                return view();
+            }
+            case "vpn_help_seen": {
+                requireIdentity();
+                if(request.optString("id").matches("(chat|wallet):[0-9]{1,16}")) {
+                    long until=System.currentTimeMillis()+ConnectionAdvisor.COOLDOWN_MS;
+                    connectionAdvisor.suppressUntil(until);
+                    application.getSharedPreferences("interface",MODE_PRIVATE).edit().putLong("vpn_hint_until",until).apply();
+                }
+                return view();
+            }
             case "settings": {
                 JSONArray relays = request.getJSONArray("relays"); if (relays.length() > 3) throw new Exception("Use up to three delivery relays");
                 JSONArray checked = new JSONArray(); for (int i = 0; i < relays.length(); i++) checked.put(checkEndpoint(relays.getString(i)));
@@ -481,7 +560,8 @@ public final class MainActivity extends Activity {
             case "background_disable":
                 stopDelivery(); application.stopService(new Intent(application, DeliveryService.class)); return view();
             case "protection_enable":
-                if(data.getJSONObject("chain").optBoolean("running") && !data.getJSONObject("chain").optBoolean("automatic")) throw new Exception("Wait for the current wallet operation");
+                if(data.getJSONObject("chain").optBoolean("running") && !data.getJSONObject("chain").optBoolean("automatic") && !activeChainOperation.equals("sync")) throw new Exception("Wait for the current wallet operation");
+                restartingWalletRoute=data.getJSONObject("chain").optBoolean("running");
                 nodeControl(false);
                 askNotificationPermission();
                 if (request.has("prefer_https")) {
@@ -489,10 +569,18 @@ public final class MainActivity extends Activity {
                     data.getJSONObject("tunnel_config").put("prefer_https", request.getBoolean("prefer_https"));
                 }
                 application.startForegroundService(new Intent(application, DeliveryService.class));
-                data.put("background_delivery", true); beginProtection(); return view();
+                data.put("background_delivery", true);
+                if(data.getJSONObject("chain").optBoolean("running")) {
+                    pendingProtection=true; data.put("protected_route",true);
+                    tunnelState=new JSONObject().put("enabled",true).put("checking",true);store.save(data);
+                } else beginProtection();
+                runOnUiThread(() -> web.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK));
+                return view();
             case "protection_disable":
-                if (data.getJSONObject("chain").optBoolean("running") && !data.getJSONObject("chain").optBoolean("automatic")) throw new Exception("Wait for the current wallet operation");
+                if (data.getJSONObject("chain").optBoolean("running") && !data.getJSONObject("chain").optBoolean("automatic") && !activeChainOperation.equals("sync")) throw new Exception("Wait for the current wallet operation");
+                restartingWalletRoute=data.getJSONObject("chain").optBoolean("running");
                 nodeControl(false);
+                pendingProtection=false;
                 data.put("protected_route", false); store.save(data); protectedRoute = false;
                 connectionGeneration++; data.put("connection", new JSONObject().put("online", false)); nextInboxAttempt = 0;
                 core("route_set", new JSONObject()); tunnelCore(new JSONObject().put("op", "stop"));
@@ -577,6 +665,7 @@ public final class MainActivity extends Activity {
         catch (SecureStore.Full full) { markStorageFull(); throw full; }
     }
     private static void sendMessage(String chat, JSONObject message) throws Exception {
+        if(!publicChatEnabled && !chat.startsWith("d:")) throw new Exception("Community chat is off in Paranoid mode.");
         requireMessageCapacity();
         JSONObject destination;
         if (chat.equals("g:parano1d")) destination = new JSONObject().put("type", "group").put("room", "parano1d");
@@ -598,7 +687,7 @@ public final class MainActivity extends Activity {
         queueDelivery();
     }
     private static void poll() throws Exception {
-        if (protectedRoute && !tunnelStarting && !tunnelState.optBoolean("connected") && System.currentTimeMillis() >= nextProtectionAttempt) beginProtection();
+        if (data.optBoolean("protected_route") && !pendingProtection && !tunnelStarting && !data.getJSONObject("chain").optBoolean("running") && !tunnelState.optBoolean("connected") && System.currentTimeMillis() >= nextProtectionAttempt) beginProtection();
         queueDelivery();
         queueInbox();
         retryPendingPayments(false);
@@ -609,6 +698,8 @@ public final class MainActivity extends Activity {
         if (data.getJSONArray("outbox").length() == 0) return;
         JSONObject snapshot = new JSONObject();
         for (String key : new String[]{"settings", "cursors", "outbox", "profile", "seed_hex"}) snapshot.put(key, data.get(key));
+        snapshot.put("outbox",ChatPolicy.envelopes(data.getJSONArray("outbox"),!publicChatEnabled));
+        if(snapshot.getJSONArray("outbox").length()==0)return;
         final JSONObject frozen = new JSONObject(snapshot.toString()); deliveryBusy = true;
         deliveryWorker.execute(() -> {
             Set<String> delivered = new HashSet<>(), expired = new HashSet<>();
@@ -618,6 +709,7 @@ public final class MainActivity extends Activity {
                     String relay = relays.getString(j);
                     for (int i = 0; i < Math.min(outbox.length(), 8); i++) {
                         JSONObject envelope = outbox.getJSONObject(i);
+                        if(!ChatPolicy.allows(envelope,!publicChatEnabled)) continue;
                         if (envelope.getJSONObject("data").getLong("expires_ms") <= System.currentTimeMillis()) { expired.add(envelope.getString("id")); continue; }
                         try { http(relay, "/v1/messages", envelope, null); delivered.add(envelope.getString("id")); } catch (Exception unavailable) { if (BuildConfig.DEBUG) android.util.Log.d("Paramo1dConnection", unavailable.getClass().getSimpleName() + ": " + unavailable.getMessage()); break; }
                     }
@@ -637,16 +729,25 @@ public final class MainActivity extends Activity {
     private static void queueInbox() throws Exception {
         if (inboxBusy || tunnelStarting || System.currentTimeMillis() < nextInboxAttempt) return;
         JSONObject snapshot = new JSONObject();
-        for (String key : new String[]{"settings", "cursors", "profile", "seed_hex", "connection"}) snapshot.put(key, data.get(key));
+        for (String key : new String[]{"settings", "cursors", "profile", "seed_hex", "connection", "paranoid_mode"}) snapshot.put(key, data.get(key));
         final JSONObject frozen = new JSONObject(snapshot.toString()); inboxBusy = true;
         final long generation = connectionGeneration;
         inboxWorker.execute(() -> {
-            JSONArray pages = new JSONArray(); boolean online = false, streaming = false;
+            JSONArray pages = new JSONArray(); boolean online = false, streaming = false, networkFailed=false;
             try {
                 JSONArray relays = frozen.getJSONObject("settings").getJSONArray("relays");
                 for (int j = 0; j < relays.length(); j++) {
                     String relay = relays.getString(j), contact = frozen.getJSONObject("profile").getString("id");
                     JSONObject cursors = frozen.getJSONObject("cursors");
+                    if(frozen.optBoolean("paranoid_mode")) {
+                        String path="/v1/inbox/"+contact+"?after="+cursors.optLong(relay+"|inbox",0)+"&limit=30";
+                        try {
+                            JSONObject auth=nativeResult(new JSONObject().put("op","read_auth").put("path",path).put("seed_hex",frozen.getString("seed_hex")).put("now_ms",System.currentTimeMillis()));
+                            pages.put(new JSONObject().put("relay",relay).put("scope","inbox").put("authenticated",true).put("page",http(relay,path,null,auth)));
+                            online=true;
+                        } catch(Exception unavailable) {networkFailed|=transportFailure(unavailable);}
+                        continue;
+                    }
                     String path = "/v1/sync/" + contact + "?group_after=" + cursors.optLong(relay + "|g:parano1d", 0) + "&inbox_after=" + cursors.optLong(relay + "|inbox", 0) + "&wait_ms=" + (online || !frozen.getJSONObject("connection").optBoolean("online") ? 0 : 10000);
                     try {
                         JSONObject auth = nativeResult(new JSONObject().put("op", "read_auth").put("path", path).put("seed_hex", frozen.getString("seed_hex")).put("now_ms", System.currentTimeMillis()));
@@ -655,6 +756,7 @@ public final class MainActivity extends Activity {
                         pages.put(new JSONObject().put("relay", relay).put("scope", "inbox").put("authenticated", true).put("page", both.getJSONObject("inbox")));
                         online = true; streaming = true;
                     } catch (Exception unavailable) {
+                        networkFailed |= transportFailure(unavailable);
                         if (!String.valueOf(unavailable.getMessage()).contains("404")) continue;
                         for (String scope : new String[]{"g:parano1d", "inbox"}) {
                             boolean authenticated = scope.equals("inbox");
@@ -666,7 +768,7 @@ public final class MainActivity extends Activity {
                     }
                 }
             } catch (Exception unavailable) { }
-            final boolean connected = online, immediate = streaming;
+            final boolean connected = online, immediate = streaming, transportFailed=networkFailed;
             chatWorker.execute(() -> { inboxBusy = false;
                 if (generation != connectionGeneration) { nextInboxAttempt = 0; try { queueInbox(); } catch (Exception ignored) {} return; }
                 try {
@@ -676,6 +778,7 @@ public final class MainActivity extends Activity {
                     JSONObject page = pages.getJSONObject(i); changed |= page.getJSONObject("page").getJSONArray("messages").length() > 0;
                     receivePage(page.getString("relay"), page.getString("scope"), page.getBoolean("authenticated"), page.getJSONObject("page"));
                 }
+                if(connected) connectionAdvisor.chatConnected();else if(transportFailed) connectionAdvisor.chatFailed(System.currentTimeMillis());
                 data.put("connection", new JSONObject().put("online", connected));
                 if (connected) retryPendingPayments(reconnected);
                 if (changed) store.save(data);
@@ -687,6 +790,7 @@ public final class MainActivity extends Activity {
         });
     }
     private static void receivePage(String relay, String scope, boolean authenticated, JSONObject page) throws Exception {
+        if(!publicChatEnabled && !authenticated)return;
         String cursorKey = relay + "|" + scope; JSONObject cursors = data.getJSONObject("cursors");
         long processed = cursors.optLong(cursorKey);
         if (page.getLong("cursor") < cursors.optLong(cursorKey)) throw new Exception("Relay cursor moved backwards");
@@ -857,8 +961,31 @@ public final class MainActivity extends Activity {
                 tunnelState = new JSONObject().put("enabled", true).put("checking", false).put("connected", failure == null);
                 if (failure == null && checked != null) tunnelState.put("transport", checked.optString("transport"));
                 if (failure != null) tunnelState.put("problem", failure.contains("EPERM") || failure.contains("Binding socket") ? "Your other VPN blocks direct connections. Exclude Paramo1d in its per-app settings, then retry." : "Protected connection could not reach the network. Retry or connect nearby.");
+                if(failure==null) nextNodeAttempt=0;
                 publishView(); if (failure == null) poll();
             } catch (Exception ignored) { } });
+        });
+    }
+
+    private void paranoidModeHaptic() {
+        runOnUiThread(() -> {
+            if (android.provider.Settings.System.getInt(getContentResolver(), android.provider.Settings.System.HAPTIC_FEEDBACK_ENABLED, 1) == 0) return;
+            try {
+                android.os.Vibrator vibrator;
+                if (android.os.Build.VERSION.SDK_INT >= 31) {
+                    android.os.VibratorManager manager = getSystemService(android.os.VibratorManager.class);
+                    vibrator = manager == null ? null : manager.getDefaultVibrator();
+                } else vibrator = getSystemService(android.os.Vibrator.class);
+                if (vibrator == null || !vibrator.hasVibrator()) return;
+                android.os.VibrationEffect effect = android.os.VibrationEffect.createOneShot(40, android.os.VibrationEffect.DEFAULT_AMPLITUDE);
+                if (android.os.Build.VERSION.SDK_INT >= 33) {
+                    vibrator.vibrate(effect, new android.os.VibrationAttributes.Builder().setUsage(android.os.VibrationAttributes.USAGE_TOUCH).build());
+                } else {
+                    vibrator.vibrate(effect, new android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_ASSISTANCE_SONIFICATION).build());
+                }
+            } catch (RuntimeException unavailable) {
+                web.performHapticFeedback(android.view.HapticFeedbackConstants.CONTEXT_CLICK);
+            }
         });
     }
 
@@ -891,7 +1018,7 @@ public final class MainActivity extends Activity {
         if (!automatic) nextNodeAttempt=System.currentTimeMillis()+10000;
         if (request.getString("op").equals("payment_send")) reserveStorage(2 * 1024 * 1024);
         if(automatic) request.put("follow",true);
-        JSONObject snapshot = new JSONObject().put("seed_hex",data.getString("seed_hex")).put("settings",new JSONObject(data.getJSONObject("settings").toString()));
+        JSONObject snapshot = new JSONObject().put("seed_hex",data.getString("seed_hex")).put("settings",new JSONObject(data.getJSONObject("settings").toString())).put("paranoid_mode",data.optBoolean("paranoid_mode"));
         snapshot.put("online",data.getJSONObject("connection").optBoolean("online"));
         if (request.getString("op").equals("payment_preview")) snapshot.put("prepared_payments",new JSONArray(data.getJSONArray("prepared_payments").toString())).put("receipts",new JSONArray(data.getJSONArray("receipts").toString()));
         if (request.getString("op").equals("payment_send")) snapshot.put("pending_review",new JSONObject(data.getJSONObject("pending_review").toString()));
@@ -902,6 +1029,7 @@ public final class MainActivity extends Activity {
             request.put("intent_hex", found.getJSONObject("message").getString("intent_hex"));
         }
         data.getJSONObject("chain").put("running", true).put("automatic",automatic);
+        activeChainOperation=request.getString("op");
         try {
         publishView();
         if (!automatic) walletScreenAwake(true);
@@ -913,10 +1041,20 @@ public final class MainActivity extends Activity {
                 postChainResult(() -> {
                     Exception completionError = null;
                     try {
+                        if(snapshot.optBoolean("paranoid_mode")!=data.optBoolean("paranoid_mode")) {
+                            nextNodeAttempt=0; data.getJSONObject("chain").put("retrying",false);
+                            reply(id,success(view())); return;
+                        }
                         JSONObject result = completed;
+                        if(request.optString("op").equals("sync")) {
+                            connectionAdvisor.walletConnected();
+                            if(snapshot.optBoolean("paranoid_mode")&&!result.getJSONObject("chain").optBoolean("deferred"))logWalletMetrics("Completed P2P check");
+                        }
                         if (request.optString("op").equals("sync") && (!automatic || pendingRefresh!=null || !result.getJSONObject("chain").optBoolean("deferred"))) android.util.Log.i("Paramo1dWallet","Balance refresh finished in "+(android.os.SystemClock.elapsedRealtime()-operationStarted)+" ms: "+(result.getJSONObject("chain").optBoolean("deferred")?"unchanged":"verified"));
                         if(result.optJSONObject("chain")!=null && result.getJSONObject("chain").optBoolean("deferred")) {
                             data.getJSONObject("chain").put("retrying",false).put("watched_at_ms",System.currentTimeMillis()).put("watch_ms",android.os.SystemClock.elapsedRealtime()-operationStarted).put("running",false).put("automatic",false);
+                            data.getJSONObject("chain").remove("mode_pending");
+                            data.getJSONObject("chain").put("transport",data.optBoolean("paranoid_mode")?"direct-p2p":"rpc");
                             nextNodeAttempt=System.currentTimeMillis()+10000;
                             reply(id, success(view()));
                             return;
@@ -953,7 +1091,7 @@ public final class MainActivity extends Activity {
                             if (destination.startsWith("d:")) try { sendMessage(destination, new JSONObject().put("type", "transaction").put("intent_hex", result.getString("intent_hex"))); } catch (Exception deferredChat) { result.put("chat_delivery_error", deferredChat.getMessage()); }
                             watch(result.getString("txid"), destination.startsWith("d:") ? destination : "wallet");
                             store.save(data); queueOwnBroadcast(result);
-                            flushOutbox(); result = new JSONObject().put("state", view()).put("txid", result.getString("txid")).put("submitted", false).put("delivery_queued", !data.getJSONObject("settings").optString("rpc").isEmpty());
+                            flushOutbox(); result = new JSONObject().put("state", view()).put("txid", result.getString("txid")).put("submitted", false).put("delivery_queued", data.optBoolean("paranoid_mode") || !data.getJSONObject("settings").optString("rpc").isEmpty());
                         }
                         if (op.equals("receipt_verify")) { JSONObject receipt = result.getJSONObject("receipt"); boolean exists = false; JSONArray receipts = data.getJSONArray("receipts"); for (int i = 0; i < receipts.length(); i++) if (receipts.getJSONObject(i).getString("txid").equals(receipt.getString("txid"))) { JSONObject previous = receipts.getJSONObject(i); for (String key : new String[]{"message_id","invoice_id"}) if (receipt.optString(key).isEmpty()) receipt.put(key,previous.optString(key)); receipts.put(i,receipt); exists = true; break; } if (!exists) receipts.put(receipt); result.put("state", view()); }
                         if (op.equals("broadcast_send")) { String destination = "g:parano1d"; JSONArray messages = data.getJSONArray("messages"); for (int i = 0; i < messages.length(); i++) if (messages.getJSONObject(i).getString("id").equals(request.getString("message_id"))) { destination = messages.getJSONObject(i).getString("chat"); messages.getJSONObject(i).remove("broadcast_error"); } watch(result.getString("txid"), destination); sendMessage(destination, new JSONObject().put("type", "relay_update").put("txid", result.getString("txid")).put("stage", "submitted").put("receipt_hex", JSONObject.NULL)); flushOutbox(); }
@@ -964,7 +1102,7 @@ public final class MainActivity extends Activity {
                     } catch (Exception error) { completionError=error;if(automatic)nextNodeAttempt=System.currentTimeMillis()+15000;reply(id, failure(error)); }
                     finally { finishChainAction(completionError); }
                 });
-            } catch (Exception error) { postChainResult(() -> { try { if (request.optString("op").equals("sync") && (!automatic || pendingRefresh!=null)) android.util.Log.i("Paramo1dWallet","Balance refresh failed after "+(android.os.SystemClock.elapsedRealtime()-operationStarted)+" ms");recordBroadcastFailure(request, error); if(automatic){nextNodeAttempt=System.currentTimeMillis()+15000;data.getJSONObject("chain").put("retrying",nodeAllowed());} reply(id, failure(error)); } catch(Exception ignored){} finally {finishChainAction(error);} }); }
+            } catch (Exception error) { postChainResult(() -> { boolean modeChanged=snapshot.optBoolean("paranoid_mode")!=data.optBoolean("paranoid_mode"),routeChanged=restartingWalletRoute; try { if(modeChanged||routeChanged) {nextNodeAttempt=0;data.getJSONObject("chain").put("retrying",false);reply(id,success(view()));return;} if (request.optString("op").equals("sync") && (!automatic || pendingRefresh!=null)) android.util.Log.i("Paramo1dWallet","Balance refresh failed after "+(android.os.SystemClock.elapsedRealtime()-operationStarted)+" ms: "+(String.valueOf(error.getMessage()).startsWith("Peers cannot supply")?error.getMessage():error.getClass().getSimpleName()));recordBroadcastFailure(request, error); if(request.optString("op").equals("sync")&&transportFailure(error)) connectionAdvisor.walletFailed(System.currentTimeMillis()); if(automatic){nextNodeAttempt=System.currentTimeMillis()+15000;data.getJSONObject("chain").put("retrying",nodeAllowed());} reply(id, failure(error)); } catch(Exception ignored){} finally {finishChainAction(modeChanged||routeChanged?null:error);} }); }
         });
         } catch (Exception error) {
             finishChainAction(error);
@@ -981,11 +1119,21 @@ public final class MainActivity extends Activity {
         }
     }
     private void finishChainAction(Exception error) {
+        boolean routeChanged=restartingWalletRoute;restartingWalletRoute=false;activeChainOperation="";
+        if(routeChanged) nextNodeAttempt=0;
         PendingChain refresh=pendingRefresh; pendingRefresh=null;
         PendingChain pending=pendingChain; pendingChain=null;
         walletScreenAwake(false);
         try {
-            data.getJSONObject("chain").put("running",false).put("automatic",false); publishView();
+            data.getJSONObject("chain").put("running",false).put("automatic",false);
+            if(pendingProtection) {
+                pendingProtection=false;
+                if(data.optBoolean("protected_route")) {
+                    try { beginProtection(); }
+                    catch(Exception unavailable) {tunnelState=new JSONObject().put("enabled",true).put("checking",false).put("connected",false).put("problem","Protected connection could not start. Open Connections to retry.");}
+                }
+            }
+            publishView();
             if(refresh!=null) refresh.owner.reply(refresh.id,error==null?refresh.owner.success(view()):refresh.owner.failure(error));
         } catch(Exception completionError) {
             if(refresh!=null) refresh.owner.reply(refresh.id,refresh.owner.failure(error==null?completionError:error));
@@ -997,12 +1145,14 @@ public final class MainActivity extends Activity {
     private JSONObject chainAction(JSONObject request, JSONObject snapshot) throws Exception {
         String op = request.getString("op");
         String rpc = snapshot.getJSONObject("settings").optString("rpc");
+        boolean paranoid=snapshot.optBoolean("paranoid_mode");
+        request.put("paranoid_mode",paranoid);
         File artifacts = new File(getFilesDir(), "artifacts"); File chain = new File(getFilesDir(), "chain");
-        if (op.equals("broadcast_send") && rpc.isEmpty()) throw new Exception("Add a chain data endpoint in Settings");
+        if (op.equals("broadcast_send") && !paranoid && rpc.isEmpty()) throw new Exception("Add a chain data endpoint in Settings");
         if (op.equals("sync") || op.equals("payment_preview")) {
             installParameters(artifacts);
             if (!new File(artifacts, "legacy").isFile()) throw new Exception("Install the released verification parameters to synchronize");
-            if (op.equals("payment_preview") && rpc.isEmpty() && !request.optBoolean("use_cached")) throw new Exception("Add a chain data endpoint in Settings");
+            if (op.equals("payment_preview") && !paranoid && rpc.isEmpty() && !request.optBoolean("use_cached")) throw new Exception("Add a chain data endpoint in Settings");
             JSONObject args = new JSONObject(request.toString()).put("artifacts", artifacts.getAbsolutePath()).put("data_dir", chain.getAbsolutePath()).put("rpc", rpc).put("seed_hex", snapshot.getString("seed_hex"));
             if (op.equals("payment_preview")) {
                 args.put("online",snapshot.optBoolean("online"));
@@ -1016,13 +1166,13 @@ public final class MainActivity extends Activity {
                 }
                 return nativeResult(args.put("reservations", reservations)).put("chat", request.optString("chat")).put("invoice_id", request.optString("invoice_id")).put("replaces_txid", request.optString("replaces_txid"));
             }
-            if (!rpc.isEmpty()) return new JSONObject().put("chain", nativeResult(args.put("op", "wallet_sync")));
+            if (paranoid || !rpc.isEmpty()) return new JSONObject().put("chain", nativeResult(args.put("op", "wallet_sync")));
             JSONObject synced = nativeResult(args.put("op", "sync_once")); return new JSONObject().put("chain", synced.getJSONObject("verified"));
         }
         if (op.equals("payment_send")) {
             JSONObject review = snapshot.getJSONObject("pending_review");
             if (!review.getString("review_id").equals(request.getString("review_id"))) throw new Exception("Payment review has changed");
-            JSONObject authorized = nativeResult(new JSONObject().put("op", "payment_authorize").put("seed_hex", snapshot.getString("seed_hex")).put("review_id", review.getString("review_id")).put("unsigned_intent", review.getString("unsigned_intent")).put("data_dir", chain.getAbsolutePath()).put("artifacts", artifacts.getAbsolutePath()).put("online", snapshot.optBoolean("online")));
+            JSONObject authorized = nativeResult(new JSONObject().put("op", "payment_authorize").put("paranoid_mode",paranoid).put("seed_hex", snapshot.getString("seed_hex")).put("review_id", review.getString("review_id")).put("unsigned_intent", review.getString("unsigned_intent")).put("data_dir", chain.getAbsolutePath()).put("artifacts", artifacts.getAbsolutePath()).put("online", snapshot.optBoolean("online")));
             authorized.put("chat", review.optString("chat")).put("invoice_id", review.optString("invoice_id")).put("replaces_txid", review.optString("replaces_txid"));
             if (review.has("valid_through_height")) authorized.put("valid_through_height", review.getLong("valid_through_height"));
             for (String key : new String[]{"to", "amount", "fee"}) authorized.put(key, review.get(key));
@@ -1151,13 +1301,13 @@ public final class MainActivity extends Activity {
         store.save(data);
     }
     private static void queueOwnBroadcast(JSONObject packet) throws Exception {
-        String rpc = data.getJSONObject("settings").optString("rpc"); if (rpc.isEmpty()) return;
+        String rpc = data.getJSONObject("settings").optString("rpc"); boolean paranoid=data.optBoolean("paranoid_mode"); if (!paranoid && rpc.isEmpty() || paranoid && !visible) return;
         String txid = packet.getString("txid"); if (!sendingPayments.add(txid)) return;
         packet.put("last_delivery_ms", System.currentTimeMillis());
         final JSONObject frozen = new JSONObject(packet.toString());
         try { paymentDeliveryWorker.execute(() -> {
             String failure = null;
-            try { nativeResult(new JSONObject(frozen.toString()).put("op", "broadcast_send").put("rpc", rpc)); }
+            try { nativeResult(new JSONObject(frozen.toString()).put("op", "broadcast_send").put("rpc", rpc).put("paranoid_mode",paranoid).put("artifacts",new File(application.getFilesDir(),"artifacts").getAbsolutePath()).put("data_dir",new File(application.getFilesDir(),"chain").getAbsolutePath())); }
             catch (Exception error) { failure = error.getMessage(); }
             final String error = failure;
             chatWorker.execute(() -> { try {
@@ -1187,14 +1337,15 @@ public final class MainActivity extends Activity {
         if (next.length() < 2000) next.put(observation); data.put("observations", next);
     }
     private static void scheduleObservations() throws Exception {
-        String rpc = data.getJSONObject("settings").optString("rpc"); if (rpc.isEmpty()) return;
+        String rpc = data.getJSONObject("settings").optString("rpc"); boolean paranoid=data.optBoolean("paranoid_mode"); if (!paranoid && rpc.isEmpty() || paranoid && !visible) return;
         JSONArray watches = data.getJSONArray("watches"); long now = System.currentTimeMillis();
         for (int i = 0; i < watches.length(); i++) {
             JSONObject watched = watches.getJSONObject(i);
+            if(!publicChatEnabled && watched.optString("chat").startsWith("g:"))continue;
             if (now - watched.optLong("last_ms") < 30000 || watched.optString("stage").equals("included") || now - watched.optLong("created_ms", now) >= 3600000) continue;
             watched.put("last_ms", now); String txid = watched.getString("txid"); String destination = watched.getString("chat");
             chainWorker.execute(() -> {
-                try { JSONObject status = nativeResult(new JSONObject().put("op", "transaction_status").put("rpc", rpc).put("txid", txid));
+                try { JSONObject status = nativeResult(new JSONObject().put("op", "transaction_status").put("rpc", rpc).put("paranoid_mode",paranoid).put("artifacts",new File(application.getFilesDir(),"artifacts").getAbsolutePath()).put("data_dir",new File(application.getFilesDir(),"chain").getAbsolutePath()).put("txid", txid));
                     chatWorker.execute(() -> { try {
                         String stage = status.getString("stage"); if (!(stage.equals("included") || stage.equals("in_mempool"))) return;
                         boolean changed = !watched.getString("stage").equals(stage); if (!changed && System.currentTimeMillis() - watched.optLong("published_ms") < 120000) return;
@@ -1250,6 +1401,7 @@ public final class MainActivity extends Activity {
         }
         data.put("envelopes", next);
     }
+    static boolean allowsNearbyEnvelope(JSONObject envelope) {return ChatPolicy.allows(envelope,!publicChatEnabled);}
     static java.util.concurrent.CompletableFuture<JSONObject> nearbyCall(String action, JSONObject args) {
         java.util.concurrent.CompletableFuture<JSONObject> future = new java.util.concurrent.CompletableFuture<>();
         try { chatWorker.execute(() -> { try {
@@ -1263,7 +1415,7 @@ public final class MainActivity extends Activity {
             else if (action.equals("connected")) { addContact(args.getJSONObject("contact")); publishView(); }
             else if (action.equals("inventory")) {
                 JSONArray ids = new JSONArray(); Set<String> known = new HashSet<>(); long now = System.currentTimeMillis();
-                for (String key : new String[]{"outbox", "envelopes"}) { JSONArray list = data.getJSONArray(key); for (int i = 0; i < list.length() && ids.length() < 128; i++) { JSONObject envelope = list.getJSONObject(i); String id = envelope.getString("id"); if (envelope.getJSONObject("data").getLong("expires_ms") > now && known.add(id)) ids.put(id); } }
+                for (String key : new String[]{"outbox", "envelopes"}) { JSONArray list = data.getJSONArray(key); for (int i = 0; i < list.length() && ids.length() < 128; i++) { JSONObject envelope = list.getJSONObject(i); if(!allowsNearbyEnvelope(envelope))continue; String id = envelope.getString("id"); if (envelope.getJSONObject("data").getLong("expires_ms") > now && known.add(id)) ids.put(id); } }
                 result.put("ids", ids);
             } else if (action.equals("missing")) {
                 JSONArray wanted = new JSONArray(), requested = args.getJSONArray("ids"); if (requested.length() > 128) throw new Exception("Nearby inventory exceeds limit"); Set<String> known = new HashSet<>();
@@ -1273,7 +1425,7 @@ public final class MainActivity extends Activity {
                 result.put("ids", wanted);
             } else if (action.equals("packets")) {
                 JSONArray requested = args.getJSONArray("ids"); if (requested.length() > 8) throw new Exception("Nearby request exceeds limit"); Set<String> wanted = new HashSet<>(); for (int i = 0; i < requested.length(); i++) wanted.add(requested.getString(i));
-                JSONArray packets = new JSONArray(); for (String key : new String[]{"outbox", "envelopes"}) { JSONArray list = data.getJSONArray(key); for (int i = 0; i < list.length(); i++) { JSONObject item = list.getJSONObject(i); if (wanted.remove(item.getString("id"))) packets.put(item); } } result.put("envelopes", packets);
+                JSONArray packets = new JSONArray(); for (String key : new String[]{"outbox", "envelopes"}) { JSONArray list = data.getJSONArray(key); for (int i = 0; i < list.length(); i++) { JSONObject item = list.getJSONObject(i); if (allowsNearbyEnvelope(item) && wanted.remove(item.getString("id"))) packets.put(item); } } result.put("envelopes", packets);
             } else if (action.equals("accept")) result = acceptNearby(args.getJSONObject("envelope"));
             else if (action.equals("ack")) { JSONArray messages = data.getJSONArray("messages"); for (int i = 0; i < messages.length(); i++) if (messages.getJSONObject(i).getString("id").equals(args.getString("id"))) messages.getJSONObject(i).put("nearby_delivered", true); store.save(data); publishView(); }
             else if (action.equals("poll")) poll();
@@ -1285,6 +1437,7 @@ public final class MainActivity extends Activity {
     }
     private static JSONObject acceptNearby(JSONObject envelope) throws Exception {
         String id = envelope.getString("id");
+        if(!ChatPolicy.allows(envelope,!publicChatEnabled)) return new JSONObject().put("id",id).put("new",false);
         if (ChatHistory.wasCleared(data, id, System.currentTimeMillis())) return new JSONObject().put("id", id).put("new", false);
         for (String key : new String[]{"envelopes", "messages", "observations"}) { JSONArray list = data.getJSONArray(key); for (int i = 0; i < list.length(); i++) if (list.getJSONObject(i).getString("id").equals(id)) return new JSONObject().put("id", id).put("new", false); }
         JSONObject destination = envelope.getJSONObject("data").getJSONObject("destination"); boolean direct = destination.getString("type").equals("direct");

@@ -122,7 +122,8 @@ impl Verifier {
         if self.headers.is_some() {
             return Ok(None);
         }
-        let headers = CheckedHeaders::verify(&bundle.join("headers.bin"))?;
+        let headers = CheckedHeaders::restore_checkpoint(&bundle.join("headers.bin"))
+            .or_else(|_| CheckedHeaders::verify(&bundle.join("headers.bin")))?;
         let summary = headers.summary();
         self.headers = Some(headers);
         self.resume_headers_only = true;
@@ -320,6 +321,7 @@ impl Verifier {
             reused_headers: headers.reused,
             reused_verification: false,
         };
+        let _ = headers.save_checkpoint(&bundle.join("headers.bin"));
         self.headers = Some(headers);
         self.resume_headers_only = false;
         Ok(result)

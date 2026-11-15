@@ -18,3 +18,7 @@
 *.jks
 *.p12
 __pycache__/
+
+/android/reports/
+
+/reports/

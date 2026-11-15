@@ -1,18 +1,41 @@
 use crate::collector::copy_origins;
 use anyhow::{bail, ensure, Context, Result};
 use noid_chain::{consensus::genesis::genesis_header, history_step::HistoryStepTerminalMetadata};
-use reqwest::{blocking::Client, redirect::Policy, Url};
+use reqwest::{redirect::Policy, Client, Url};
 use serde_json::{json, Value};
 use std::{
+    cell::{Cell, RefCell},
     collections::BTreeMap,
     fs::{self, File},
-    io::{Read, Write},
+    io::Write,
     path::Path,
     time::Duration,
 };
 
 const MAX_RPC_BYTES: u64 = 4 * 1024 * 1024;
 const HEADER_BATCH: u64 = 64;
+thread_local! {
+    static REQUESTS: Cell<u64> = const { Cell::new(0) };
+    static HTTP_RUNTIME: RefCell<Option<tokio::runtime::Runtime>> = const { RefCell::new(None) };
+}
+fn with_http<T>(work: impl FnOnce(&tokio::runtime::Runtime) -> Result<T>) -> Result<T> {
+    HTTP_RUNTIME.with(|slot| {
+        let mut slot = slot
+            .try_borrow_mut()
+            .context("Wallet data connection is busy")?;
+        if slot.is_none() {
+            *slot = Some(
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?,
+            );
+        }
+        work(slot.as_ref().expect("HTTP runtime initialized"))
+    })
+}
+pub(crate) fn request_count() -> u64 {
+    REQUESTS.with(Cell::get)
+}
 
 pub struct Rpc {
     endpoint: Url,
@@ -28,6 +51,10 @@ impl Rpc {
         Self::with_timeout(endpoint, Duration::from_secs(5))
     }
     fn with_timeout(endpoint: &str, timeout: Duration) -> Result<Self> {
+        ensure!(
+            !crate::peer_wallet::rpc_forbidden(),
+            "Paranoid mode uses direct P2P. Server RPC is disabled."
+        );
         let endpoint = Url::parse(endpoint)?;
         let loopback = endpoint.host_str().is_some_and(|host| {
             host == "localhost"
@@ -62,23 +89,49 @@ impl Rpc {
     }
 
     fn post(&self, body: &Value) -> Result<Value> {
-        crate::mobile_control::check()?;
-        let response = self
-            .client
-            .post(self.endpoint.clone())
-            .json(body)
-            .send()?
-            .error_for_status()?;
-        if let Some(length) = response.content_length() {
-            ensure!(length <= MAX_RPC_BYTES, "RPC byte limit");
-        }
-        let mut bytes = Vec::new();
-        response.take(MAX_RPC_BYTES + 1).read_to_end(&mut bytes)?;
         ensure!(
-            bytes.len() as u64 <= MAX_RPC_BYTES,
-            "RPC streamed byte limit"
+            !crate::peer_wallet::rpc_forbidden(),
+            "Paranoid mode uses direct P2P. Server RPC is disabled."
         );
-        Ok(serde_json::from_slice(&bytes)?)
+        crate::mobile_control::check()?;
+        REQUESTS.with(|count| count.set(count.get().saturating_add(1)));
+        with_http(|runtime| {
+            runtime.block_on(crate::mobile_control::cancellable(async {
+                let waiting = crate::mobile_control::token()
+                    .map(|_| crate::mobile_control::waiting_for_network("wallet-rpc"));
+                let mut response = self
+                    .client
+                    .post(self.endpoint.clone())
+                    .json(body)
+                    .send()
+                    .await
+                    .map_err(reqwest::Error::without_url)?
+                    .error_for_status()
+                    .map_err(reqwest::Error::without_url)?;
+                if waiting.is_some() {
+                    crate::mobile_control::network_progress();
+                }
+                if let Some(length) = response.content_length() {
+                    ensure!(length <= MAX_RPC_BYTES, "RPC byte limit");
+                }
+                let mut bytes = Vec::new();
+                while let Some(chunk) = response
+                    .chunk()
+                    .await
+                    .map_err(reqwest::Error::without_url)?
+                {
+                    ensure!(
+                        bytes.len().saturating_add(chunk.len()) as u64 <= MAX_RPC_BYTES,
+                        "RPC streamed byte limit"
+                    );
+                    bytes.extend_from_slice(&chunk);
+                    if waiting.is_some() {
+                        crate::mobile_control::network_progress();
+                    }
+                }
+                Ok(serde_json::from_slice(&bytes)?)
+            }))
+        })
     }
 
     fn envelope(value: &Value, expected: &str) -> Result<Value> {

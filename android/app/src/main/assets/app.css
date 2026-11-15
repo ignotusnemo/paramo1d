@@ -266,3 +266,72 @@ body:has(.storage-alert:not([hidden])) #app{padding-bottom:0}
 }
 
 dialog[data-kind="STORAGE"][open]{display:flex;flex-direction:column;max-height:90dvh;overflow:hidden}dialog[data-kind="STORAGE"] #modal-content{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}dialog[data-kind="STORAGE"] #modal-content>p{margin:7px 0}.storage-controls{flex-shrink:0;margin:5px 0}.storage-chats{flex:1;min-height:100px;overflow-y:auto;overscroll-behavior:contain;margin:8px 0}.storage-footer{position:static;flex-shrink:0;margin-top:8px;padding-top:8px}.storage-footer .storage-selection{margin:5px 0 9px}.storage-chat{flex-direction:row!important}.storage-warning{flex-shrink:0;margin-bottom:7px}
+
+/* The header keeps connection controls and the wallet transport switch visible. */
+.masthead{height:72px;padding:0 20px;gap:12px;border-bottom:1px solid #07120d33}
+.masthead .brand{width:44px;height:48px;flex-shrink:0;justify-content:center}
+.masthead .brand-logo{width:42px;height:42px;border-radius:50%;background:#171d2a;filter:none}
+.mast-actions{gap:12px;min-width:0}
+.masthead .connection{border:1px solid #07120d22;border-radius:15px;background:#07120d08;color:#07120d;min-width:120px;min-height:50px;padding:8px 13px;gap:5px;box-shadow:inset 0 1px 0 #ffffff35}
+.masthead .connection .connection-action{font:700 11px var(--sans);letter-spacing:0;justify-content:space-between;gap:8px}
+.masthead .connection .connection-action .icon{width:13px;height:13px;opacity:.65}
+.masthead .connection .connection-state{font:11px var(--sans);letter-spacing:0;gap:6px}
+.masthead #settings-button{width:40px;height:44px;border-radius:15px;background:#07120d0c;color:#07120d}
+.hardware-switch{min-width:92px;min-height:52px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:5px;border-radius:14px;padding:3px 8px;background:#07120d0b;color:#07120d;touch-action:manipulation}
+.hardware-switch:disabled{cursor:wait;opacity:.7}.paranoid-label{display:flex;align-items:center;gap:5px;font:700 9px/1 var(--mono);letter-spacing:.1px}
+.paranoid-led{width:5px;height:5px;border-radius:50%;background:#46634e;box-shadow:inset 0 1px 1px #0005}
+.rocker-case{position:relative;display:block;width:69px;height:27px;border-radius:8px;border:1px solid #14231a;background:linear-gradient(180deg,#4d5850,#28382d 48%,#526355);box-shadow:inset 0 2px 4px #0008,0 1px 0 #ffffff65;isolation:isolate}
+.rocker-word{position:absolute;top:8px;color:#e1e9e1;font:700 8px/1 var(--mono);letter-spacing:.3px;text-shadow:0 1px 1px #000;z-index:1}.rocker-word.off{left:7px}.rocker-word.on{right:9px}
+.rocker-lever{position:absolute;left:3px;top:2px;width:31px;height:21px;border:1px solid #f4f0dc;border-radius:5px;background:linear-gradient(105deg,#c3c7b8,#f6f3df 40%,#d8d8c9 60%,#9baf9d);box-shadow:1px 1px 2px #0009,inset 0 1px 0 #fff;transition:transform .16s ease;z-index:2}
+.rocker-lever:before{content:"";position:absolute;left:9px;top:4px;width:9px;height:11px;border-left:1px solid #8b9584;border-right:1px solid #fbfff5;background:repeating-linear-gradient(90deg,#a5ae9d 0 1px,#e8ecdd 1px 3px);opacity:.8}
+.hardware-switch[aria-checked="true"] .rocker-lever{transform:translateX(30px);background:linear-gradient(105deg,#d3c5a7,#fff0d2 40%,#f6d3a0 60%,#c49352)}
+.hardware-switch[aria-checked="true"] .paranoid-led{background:#ffdc86;box-shadow:0 0 4px #7b360085,inset 0 1px 1px #fff9}
+:root[data-paranoid="true"]{--green:#ff9b36;--paper:#f8f2e9;--soft:#f1e6d6;--line:#cabba8;--chat-paper:#f1eae0;--own-bubble:#ffe1b7;--quote:#92500f}
+:root[data-theme="dark"][data-paranoid="true"]{--paper:#171410;--surface:#241e17;--soft:#382b1f;--line:#66503c;--muted:#cbbca9;--chat-paper:#15120f;--bubble:#2b231a;--own-bubble:#50351c;--quote:#ffc37d;--ink:#fff1df}
+:root[data-paranoid="true"] .connection-toggle[aria-checked="true"] .toggle-track{background:var(--green);border-color:#875218}
+:root[data-paranoid="true"] .chat-header .room-avatar{border-color:var(--line)}
+#mode-glitch{display:none;position:fixed;inset:0;z-index:10000;pointer-events:none;background:repeating-linear-gradient(0deg,transparent 0 5px,#ffad5814 5px 6px);border-top:2px solid var(--green);opacity:0}
+.mode-shift #mode-glitch{display:block;animation:mode-scan .34s ease-out both}
+.mode-shift #app{animation:mode-shift .3s steps(1,end) both}
+@keyframes mode-shift{0%{transform:translateX(0)}14%{transform:translateX(-2px) skewX(.12deg)}36%{transform:translateX(2px)}58%{transform:translateX(-1px)}80%,100%{transform:none}}
+@keyframes mode-scan{0%{opacity:.5;clip-path:inset(0 0 90% 0)}100%{opacity:0;clip-path:inset(90% 0 0 0)}}
+@media(max-width:760px){.masthead{height:64px;padding:0 12px;gap:8px}.mast-actions{gap:8px}.masthead .brand,.masthead .brand-logo{width:38px}.masthead .connection{min-width:112px;min-height:46px;padding:7px 11px;border-radius:17px}.hardware-switch{min-width:88px;padding:2px 5px}.masthead #settings-button{width:36px}}
+@media(max-width:350px){.masthead{padding:0 8px;gap:6px}.mast-actions{gap:5px}.masthead .connection{min-width:102px;padding:7px 9px}.hardware-switch{min-width:84px}.masthead #settings-button{width:32px}}
+@media(prefers-reduced-motion:reduce){.rocker-lever,.masthead .brand-logo{transition:none}.mode-shift #mode-glitch{display:none}.mode-shift #app{animation:none}}
+
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.masthead .connection .connection-state{color:#173923}.masthead .connection:hover{background:#ffffff24}.masthead .connection .connection-state i{box-shadow:0 0 0 2px #ffffff28}
+.rocker-word{display:none}
+.rocker-lever:before{opacity:.25}
+.rocker-lever:after{content:"OFF";position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font:700 8px var(--mono);letter-spacing:.4px;color:#263328;text-shadow:0 1px 0 #fff8}
+.hardware-switch[aria-checked="true"] .rocker-lever:after{content:"ON";color:#613406}
+@media(min-width:761px){.workspace{height:calc(100dvh - 72px)}}
+
+.masthead .connection{border:0;background:transparent;box-shadow:none;padding:3px 5px;min-width:112px;min-height:52px;gap:5px;border-radius:14px;color:#07120d;justify-content:center;align-items:center}
+.masthead .connection:hover{background:#07120d0b}
+.masthead .connection .connection-action{font:700 9px/1 var(--mono);letter-spacing:.1px;display:block}
+.connection-key{display:flex;align-items:center;justify-content:space-between;gap:6px;width:102px;height:27px;padding:0 8px;border:1px solid #485b48;border-radius:7px;background:linear-gradient(180deg,#f4f3df,#d8decb 55%,#bdc9b6);box-shadow:0 2px 0 #19302080,inset 0 1px 0 #ffffffe6;transition:transform .08s,box-shadow .08s;color:#263328}
+.masthead .connection .connection-state{font:700 9px/1 var(--mono);color:#263328;gap:5px;letter-spacing:0}
+.masthead .connection .connection-state i{width:6px;height:6px;border-width:1px;box-shadow:inset 0 1px 1px #0005,0 0 0 1px #f3f5e1}
+.connection-key>.icon{width:11px;height:11px;opacity:.65}
+.masthead .connection:active .connection-key{transform:translateY(1px);box-shadow:0 1px 0 #19302060,inset 0 1px 2px #334a3330}
+:root[data-paranoid="true"] .connection-key{border-color:#74542e;background:linear-gradient(180deg,#fff0d8,#eed5b2 55%,#d4b283)}
+@media(max-width:350px){.masthead .connection{min-width:104px;padding:3px 2px}.connection-key{width:100px;padding:0 6px}.mast-actions{gap:4px}}
+
+/* Connection, protected transport and wallet transport are independent controls. */
+.mast-actions{width:100%;gap:10px}.masthead .connection{margin-right:auto}
+.vpn-switch{min-width:76px;padding-left:4px;padding-right:4px}.vpn-switch .rocker-case{width:61px}.vpn-switch .rocker-lever{width:27px}
+.vpn-switch[aria-checked="true"] .rocker-lever{transform:translateX(26px);background:linear-gradient(105deg,#c5cbbb,#f6f3df 40%,#d8dfcd 60%,#9caf9d)}
+.vpn-switch[aria-checked="true"] .rocker-lever:after{color:#173923}
+.vpn-switch .vpn-led{background:#46634e;box-shadow:inset 0 1px 1px #0005}
+.vpn-switch[data-status="connected"] .vpn-led{background:#277cde;box-shadow:0 0 4px #174e8e80,inset 0 1px 1px #fff8}
+.vpn-switch[data-status="connecting"] .vpn-led{background:#f5bd44;box-shadow:0 0 3px #76510f80}
+.vpn-switch[data-status="unavailable"] .vpn-led{background:#b92921;box-shadow:0 0 3px #761d1680}
+.connection[data-status="nearby"] .connection-key>.icon,.connection[data-status="connecting"] .connection-key>.icon{display:none}
+@media(max-width:760px){.mast-actions{gap:8px}.masthead .connection{min-width:108px}.hardware-switch{min-width:94px}.vpn-switch{min-width:74px}}
+@media(max-width:380px){.masthead{padding:0 8px}.mast-actions{gap:5px}.masthead .connection{min-width:100px}.connection-key{width:94px;padding:0 6px}.hardware-switch{min-width:88px}.vpn-switch{min-width:66px}.masthead #settings-button{width:36px}}
+@media(max-width:350px){.mast-actions{gap:4px}.masthead .connection{min-width:94px;padding:3px 2px}.connection-key{width:90px;padding:0 5px}.hardware-switch{min-width:84px;padding:2px 3px}.vpn-switch{min-width:62px}.masthead #settings-button{width:36px}}
+@media(max-width:380px){.connection[data-status="nearby"] .connection-key{padding:0 4px}.masthead .connection[data-status="nearby"] .connection-state{font-size:8.5px;letter-spacing:-.05px;gap:3px}}
+
+:root[data-paranoid="true"] [data-tab="groups"],:root[data-paranoid="true"] #welcome-group{display:none!important}
+@media(min-width:761px){:root[data-paranoid="true"] .desktop-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}}

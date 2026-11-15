@@ -1,8 +1,8 @@
 {
-  "purpose": "Bounded-memory access to unchanged authenticated matrix claims",
+  "purpose": "Bounded-memory access to release-authenticated matrix claims",
   "files": {
     "Cargo.toml": "0ee6bdf52d0880c528564d57ba895eeb3199257a03b9ad9c933904b9eaebda4f",
-    "noid_ivc_core/src/field_r1cs.rs": "e2734b98219442b134d630d364e874df114d75107d4cb878d7701997d8af75fb",
+    "noid_ivc_core/src/field_r1cs.rs": "ef9c4bd0445ecea59f3bacf901c6e51e465694387d9fed56e1c7d9d340fd9c76",
     "noid_ivc_core/src/matrix_claim/c1.rs": "f9729ea3ba71d4a837bc1712182b880967b369ed717c92b97b29af47daeb4414",
     "noid_recursive/src/acceptance/history_step/v2/capacity_banked.rs": "bff619847c8bef78ba731b7b54068f8364378fb083e150c44ab32038a404a257",
     "noid_recursive/src/acceptance/history_step/v2/banked.rs": "2057abfd5eb33430eb831575aeb19911651b427b8e1c2e5642c0d7875a819bc5",

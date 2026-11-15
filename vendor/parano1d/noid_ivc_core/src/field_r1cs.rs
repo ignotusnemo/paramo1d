@@ -4173,6 +4173,53 @@ impl fmt::Debug for CompactFieldR1cs {
 }
 
 impl CompactFieldR1cs {
+    /// Open immutable canonical bytes pinned by a release preflight.
+    /// The complete SHA-256 commitment is checked before constructing rows.
+    ///
+    /// # Safety
+    /// `canonical_sha256`, `expected_shape` and `expected_structural_digest`
+    /// must be an independently trusted release tuple. The release authority
+    /// must have fully authenticated the exact canonical payload with `open`
+    /// or `open_with_c1_span_cache` before pinning its SHA-256 commitment.
+    /// A runtime caller must never derive the commitment from untrusted input.
+    pub unsafe fn open_release_pinned_canonical(
+        bytes: Box<[u8]>,
+        expected_shape: crate::proof::FieldShape,
+        expected_structural_digest: [u8; 32],
+        canonical_sha256: [u8; 32],
+        cancelled: impl Fn() -> bool,
+    ) -> Result<Self, FieldR1csArtifactError> {
+        let mut hash = Sha256::new();
+        for chunk in bytes.chunks(1024 * 1024) {
+            if cancelled() {
+                return Err(io::Error::new(io::ErrorKind::ConnectionAborted,"matrix load paused").into());
+            }
+            hash.update(chunk);
+        }
+        let actual: [u8;32] = hash.finalize().into();
+        if actual != canonical_sha256 {
+            return Err(FieldR1csArtifactError::InvalidShape("release matrix commitment"));
+        }
+        let mut authenticated = SeekableFieldR1csArtifact::preflight_for_c1(
+            std::io::Cursor::new(bytes.as_ref()), expected_shape,
+            expected_structural_digest, bytes.len() as u64,
+        )?;
+        let useful_rows = authenticated.useful_rows;
+        let layouts = authenticated.layouts;
+        let a = build_compact_matrix_index(&bytes, &mut authenticated, layouts[0])?;
+        if cancelled() {
+            return Err(io::Error::new(io::ErrorKind::ConnectionAborted,"matrix load paused").into());
+        }
+        let b = build_compact_matrix_index(&bytes, &mut authenticated, layouts[1])?;
+        drop(authenticated);
+        // Retain the authenticated allocation. Shrinking a large canonical
+        // buffer may require a second allocation on mobile libc.
+        let backing = CompactArtifactBacking::Canonical(bytes);
+        let matrices = [a,b];
+        Ok(Self {backing, shape:expected_shape, useful_rows,
+            statement_digest:expected_structural_digest, matrices, build_authenticated:false})
+    }
+
     /// Authenticate canonical bytes using an independently pinned C1 span
     /// cache, then retain immutable rows for repeated parallel evaluation.
     /// The complete canonical payload and final structural root are checked.

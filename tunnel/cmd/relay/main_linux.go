@@ -263,9 +263,17 @@ func (r *Relay) proxy(w http.ResponseWriter, q *http.Request) {
 	local.Close()
 	<-done
 }
+func publicEndpoint(value string) (string, error) {
+	address, err := net.ResolveUDPAddr("udp4", value)
+	if err != nil || address.Port <= 0 || !address.IP.IsGlobalUnicast() || address.IP.IsPrivate() {
+		return "", errors.New("invalid public UDP endpoint")
+	}
+	return address.String(), nil
+}
+
 func main() {
 	state := flag.String("state", "/var/lib/paramo1d-tunnel", "Private state directory")
-	endpoint := flag.String("endpoint", "159.198.45.62:443", "Public UDP endpoint")
+	endpoint := flag.String("endpoint", "chat.parano1d.org:443", "Public UDP endpoint")
 	flag.Parse()
 	if e := os.MkdirAll(*state, 0700); e != nil {
 		panic("Cannot open tunnel state")
@@ -274,11 +282,15 @@ func main() {
 	var config Config
 	b, e := os.ReadFile(path)
 	if os.IsNotExist(e) {
+		resolved, err := publicEndpoint(*endpoint)
+		if err != nil {
+			panic("Cannot resolve public UDP endpoint")
+		}
 		pair, e := client.Keypair()
 		if e != nil {
 			panic("Key generation failed")
 		}
-		config = Config{pair["private_key"], *endpoint, map[string]string{"jc": "4", "jmin": "40", "jmax": "120", "s1": "37", "s2": "53", "s3": "11", "s4": "17", "h1": "173451001", "h2": "283451002", "h3": "393451003", "h4": "493451004"}}
+		config = Config{pair["private_key"], resolved, map[string]string{"jc": "4", "jmin": "40", "jmax": "120", "s1": "37", "s2": "53", "s3": "11", "s4": "17", "h1": "173451001", "h2": "283451002", "h3": "393451003", "h4": "493451004"}}
 		if e = writeJSON(path, config); e != nil {
 			panic("Cannot save tunnel configuration")
 		}

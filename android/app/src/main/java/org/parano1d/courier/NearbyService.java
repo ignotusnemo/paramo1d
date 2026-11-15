@@ -60,7 +60,7 @@ public final class NearbyService extends Service {
     }
     static void offer(JSONObject envelope) {
         NearbyService service = running;
-        if (service != null) service.broadcast(envelope, null);
+        if (service != null && MainActivity.allowsNearbyEnvelope(envelope)) service.broadcast(envelope, null);
     }
     static void scan() {
         NearbyService service = running;
@@ -142,6 +142,7 @@ public final class NearbyService extends Service {
             final boolean encrypted = authenticated;
             final String encoded = frame.toString();
             try { writer.execute(() -> { try {
+                if(frame.optString("type").equals("envelope") && !MainActivity.allowsNearbyEnvelope(frame.getJSONObject("envelope")))return;
                 byte[] bytes;
                 if (encrypted) {
                     JSONObject result = call("encrypt", new JSONObject().put("contact", contact).put("context", context()).put("frame", new JSONObject(encoded)));

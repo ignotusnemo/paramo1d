@@ -7,6 +7,17 @@ import (
 	"testing"
 )
 
+func TestPublicEndpoint(t *testing.T) {
+	if endpoint, err := publicEndpoint("1.1.1.1:443"); err != nil || endpoint != "1.1.1.1:443" {
+		t.Fatal("public endpoint rejected")
+	}
+	for _, endpoint := range []string{"127.0.0.1:443", "10.80.0.1:443", "0.0.0.0:443", "1.1.1.1:0"} {
+		if _, err := publicEndpoint(endpoint); err == nil {
+			t.Fatal("non-public or unusable endpoint accepted")
+		}
+	}
+}
+
 func TestRouteRestrictsHostAndPort(t *testing.T) {
 	for _, host := range []string{"127.0.0.1:22", "10.80.0.1:22", "chat.parano1d.org:22", "example.org:443", "mseed1.parano1d.org:443"} {
 		if _, e := target(host); e == nil {

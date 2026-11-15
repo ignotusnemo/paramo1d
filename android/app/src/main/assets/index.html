@@ -17,8 +17,14 @@
 <body>
   <div id="app">
     <header class="masthead">
-      <button class="brand" id="home-button" aria-label="Paramo1d home"><img class="brand-logo" src="brand.svg" alt=""><span>paramo1d<span class="brand-period">.</span></span></button>
-      <div class="mast-actions"><button id="connection" class="connection" aria-label="Connection options"><span class="connection-action">Connections <svg class="icon" aria-hidden="true"><use href="icons.svg#outgoing"/></svg></span><span class="connection-state"><i></i><span id="connection-status">Offline</span></span></button><button id="settings-button" class="icon-button" aria-label="Settings"><svg class="icon" aria-hidden="true"><use href="icons.svg#settings"></use></svg></button></div>
+      <div class="mast-actions">
+        <button id="connection" class="connection" aria-label="Connection options"><span class="connection-action">Connections</span><span class="connection-key"><span class="connection-state"><i></i><span id="connection-status">Offline</span></span><svg class="icon" aria-hidden="true"><use href="icons.svg#outgoing"/></svg></span></button>
+        <button id="vpn-switch" class="hardware-switch vpn-switch" role="switch" aria-label="App VPN" aria-checked="false" aria-describedby="vpn-description"><span class="paranoid-label">App VPN<span class="paranoid-led vpn-led" aria-hidden="true"></span></span><span class="rocker-case" aria-hidden="true"><span class="rocker-lever"></span></span></button>
+        <span id="vpn-description" class="sr-only">Off. Uses your normal phone connection.</span>
+        <button id="paranoid-switch" class="hardware-switch" role="switch" aria-label="Paranoid mode" aria-checked="false" aria-describedby="paranoid-description"><span class="paranoid-label">Paranoid mode<span class="paranoid-led" aria-hidden="true"></span></span><span class="rocker-case" aria-hidden="true"><span class="rocker-word off">OFF</span><span class="rocker-word on">ON</span><span class="rocker-lever"></span></span></button>
+        <span id="paranoid-description" class="sr-only">Wallet data and payments use direct P2P when on. Chats keep their current connection.</span>
+        <button id="settings-button" class="icon-button" aria-label="Settings"><svg class="icon" aria-hidden="true"><use href="icons.svg#settings"></use></svg></button>
+      </div>
     </header>
 
     <section id="storage-alert" class="storage-alert" role="status" hidden><span><strong>Storage is full</strong> · Clear some chat history to receive new messages.</span><button type="button" id="storage-manage" class="outline-button">Choose chats</button></section>
@@ -37,7 +43,7 @@
       <section class="content" id="content">
         <section id="welcome-panel" class="welcome-panel">
           <span class="eyebrow">DIRECT MESSAGES</span><h2>Open a<br><span>conversation.</span></h2>
-          <p>Add a contact or meet someone in the community chat.</p>
+          <p id="welcome-description">Add a contact or meet someone in the community chat.</p>
           <button class="primary-button" id="welcome-group">Open #parano1d <span><svg class="icon" aria-hidden="true"><use href="icons.svg#outgoing"></use></svg></span></button>
         </section>
 
@@ -69,5 +75,6 @@
   <div id="onboarding" class="onboarding" hidden><div class="onboarding-inner"><img class="brand-logo large-mark" src="brand.svg" alt="Parano1d"><span class="eyebrow">WELCOME TO PARAMO1D</span><h1>Chat. Pay.<br><span>Stay connected.</span></h1><p>One community chat, private messages<br>and your NOID wallet. No phone number needed.</p><form id="create-identity-form"><label>Your display name<input id="display-name" maxlength="40" placeholder="What should people call you?" required autocomplete="nickname"></label><button class="primary-button" type="submit">Create my profile <span><svg class="icon" aria-hidden="true"><use href="icons.svg#outgoing"></use></svg></span></button></form><button id="restore-button" class="text-button">Restore from a backup</button><small>Your profile and wallet are created on this phone.<br>Save a backup in Settings to keep access.</small></div></div>
   <dialog id="modal"><div class="modal-heading"><span id="modal-eyebrow" class="eyebrow">PARAMO1D</span><button id="close-modal" class="icon-button" aria-label="Close"><svg class="icon" aria-hidden="true"><use href="icons.svg#close"></use></svg></button></div><h2 id="modal-title"></h2><div id="modal-content"></div></dialog>
   <div id="toast" role="status" hidden></div>
+  <div id="mode-glitch" aria-hidden="true"></div>
 </body>
 </html>

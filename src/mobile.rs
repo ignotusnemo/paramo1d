@@ -20,16 +20,20 @@ use noid_p2p::{
     header_sync_codec::HeaderSyncCodec,
     history_step_codec::HistoryStepTerminalCodec,
     manifest_page_codec::ManifestPageCodec,
+    mempool_sync_codec::MempoolSyncCodec,
     network_profile::{
         NetworkProfile, NetworkProfileCodec, NetworkProfileRequest, NetworkProfileResponse,
     },
     object_codec::ObjectCodec,
-    object_protocol::{DataResponseStatus, GetObjectsResponse},
+    object_protocol::{DataResponseStatus, GetObjectsRequest, GetObjectsResponse, ObjectId},
     protocol::{
         GetHeadersRequest, GetHeadersResponse, GetHistoryStepTerminalRequest,
-        GetHistoryStepTerminalResponse, GetSnapshotManifestPageResponse, GetStateManifestHeader,
+        GetHistoryStepTerminalResponse, GetMempoolResponse, GetSnapshotManifestPageRequest,
+        GetSnapshotManifestPageResponse, GetStateManifestHeader, GetStateManifestRequest,
+        GetStateSegmentRequest, GetStateSegmentResponse, MempoolRequest,
     },
     state_manifest_codec::StateManifestCodec,
+    state_segment_codec::StateSegmentCodec,
 };
 use std::{
     cell::RefCell,
@@ -54,6 +58,8 @@ struct Behaviour {
     objects: rr::Behaviour<ObjectCodec>,
     manifest: rr::Behaviour<StateManifestCodec>,
     manifest_page: rr::Behaviour<ManifestPageCodec>,
+    segment: rr::Behaviour<StateSegmentCodec>,
+    pool: rr::Behaviour<MempoolSyncCodec>,
     identify: identify::Behaviour,
     ping: ping::Behaviour,
 }
@@ -68,10 +74,23 @@ enum Command {
         Reply<GetHistoryStepTerminalResponse>,
     ),
     Origin(PeerId, [u8; 32], Reply<ForkOriginResponse>),
+    Manifest(PeerId, Reply<GetStateManifestHeader>),
+    Page(
+        PeerId,
+        GetSnapshotManifestPageRequest,
+        Reply<GetSnapshotManifestPageResponse>,
+    ),
+    Segment(
+        PeerId,
+        GetStateSegmentRequest,
+        Reply<GetStateSegmentResponse>,
+    ),
+    Objects(PeerId, GetObjectsRequest, Reply<GetObjectsResponse>),
+    Pool(PeerId, MempoolRequest, Reply<GetMempoolResponse>),
 }
 
 #[derive(Clone)]
-struct Network {
+pub(crate) struct Network {
     commands: mpsc::Sender<Command>,
     peers: watch::Receiver<Vec<PeerId>>,
     lifecycle: Option<tokio_util::sync::CancellationToken>,
@@ -190,6 +209,22 @@ impl Network {
                     protocols("/sync/manifest-page/1", ProtocolSupport::Full),
                     rr::Config::default().with_max_concurrent_streams(2),
                 ),
+                segment: rr::Behaviour::new(
+                    protocols("/sync/segment/7", ProtocolSupport::Outbound),
+                    rr::Config::default()
+                        .with_request_timeout(Duration::from_secs(45))
+                        .with_max_concurrent_streams(4),
+                ),
+                pool: rr::Behaviour::new(
+                    [
+                        protocols("/sync/mempool/4", ProtocolSupport::Outbound),
+                        protocols("/sync/mempool/3", ProtocolSupport::Outbound),
+                    ]
+                    .concat(),
+                    rr::Config::default()
+                        .with_request_timeout(Duration::from_secs(20))
+                        .with_max_concurrent_streams(4),
+                ),
                 identify: identify::Behaviour::new(
                     identify::Config::new("/noid/1.0.0".into(), key.public())
                         .with_agent_version("paramo1d/0.1.0".into()),
@@ -265,6 +300,18 @@ impl Network {
                 rr::OutboundRequestId,
                 (PeerId, [u8; 32], Reply<ForkOriginResponse>),
             > = HashMap::new();
+            let mut pending_manifest =
+                HashMap::<rr::OutboundRequestId, (PeerId, Reply<GetStateManifestHeader>)>::new();
+            let mut pending_page = HashMap::<
+                rr::OutboundRequestId,
+                (PeerId, Reply<GetSnapshotManifestPageResponse>),
+            >::new();
+            let mut pending_segment =
+                HashMap::<rr::OutboundRequestId, (PeerId, Reply<GetStateSegmentResponse>)>::new();
+            let mut pending_objects =
+                HashMap::<rr::OutboundRequestId, (PeerId, Reply<GetObjectsResponse>)>::new();
+            let mut pending_pool =
+                HashMap::<rr::OutboundRequestId, (PeerId, Reply<GetMempoolResponse>)>::new();
             loop {
                 tokio::select! {
                     _=async {match &stop {Some(t)=>t.cancelled().await,None=>std::future::pending::<()>().await}}=>break,
@@ -281,6 +328,26 @@ impl Network {
                         Some(Command::Origin(peer, request, reply)) => {
                             let id = swarm.behaviour_mut().origin.send_request(&peer, request);
                             pending_origin.insert(id, (peer, request, reply));
+                        }
+                        Some(Command::Manifest(peer, reply)) => {
+                            let id = swarm.behaviour_mut().manifest.send_request(&peer, GetStateManifestRequest { requester_height: 0, requested_manifest_digest: [0; 32] });
+                            pending_manifest.insert(id, (peer, reply));
+                        }
+                        Some(Command::Page(peer, request, reply)) => {
+                            let id = swarm.behaviour_mut().manifest_page.send_request(&peer, request);
+                            pending_page.insert(id, (peer, reply));
+                        }
+                        Some(Command::Segment(peer, request, reply)) => {
+                            let id = swarm.behaviour_mut().segment.send_request(&peer, request);
+                            pending_segment.insert(id, (peer, reply));
+                        }
+                        Some(Command::Objects(peer, request, reply)) => {
+                            let id = swarm.behaviour_mut().objects.send_request(&peer, request);
+                            pending_objects.insert(id, (peer, reply));
+                        }
+                        Some(Command::Pool(peer, request, reply)) => {
+                            let id = swarm.behaviour_mut().pool.send_request(&peer, request);
+                            pending_pool.insert(id, (peer, reply));
                         }
                         None => break,
                     },
@@ -303,7 +370,7 @@ impl Network {
                                 } else { eprintln!("  PROFILE    Peer uses different verification parameters"); let _ = swarm.disconnect_peer_id(peer); }
                             }
                             Message::Response { response, .. } => {
-                                if response.profile == profile { compatible.insert(peer); eprintln!("  PROFILE    Compatible peers: {}", compatible.len()); }
+                                if response.profile == profile { crate::mobile_control::network_progress(); compatible.insert(peer); eprintln!("  PROFILE    Compatible peers: {}", compatible.len()); }
                                 else { eprintln!("  PROFILE    Peer uses different verification parameters"); let _ = swarm.disconnect_peer_id(peer); }
                             }
                         },
@@ -322,8 +389,54 @@ impl Network {
                         SwarmEvent::Behaviour(BehaviourEvent::ManifestPage(rr::Event::Message { message: Message::Request { request, channel, .. }, .. })) => {
                             let _ = swarm.behaviour_mut().manifest_page.send_response(channel, GetSnapshotManifestPageResponse::unavailable(request.object));
                         }
+                        SwarmEvent::Behaviour(BehaviourEvent::Manifest(rr::Event::Message { peer, message: Message::Response { request_id, response }, .. })) => {
+                            if let Some((expected, reply)) = pending_manifest.remove(&request_id) {
+                                if !reply.is_closed() { crate::mobile_control::network_progress(); }
+                                let _ = reply.send(if peer == expected { Ok(response) } else { Err(anyhow::anyhow!("manifest response peer")) });
+                            }
+                        }
+                        SwarmEvent::Behaviour(BehaviourEvent::ManifestPage(rr::Event::Message { peer, message: Message::Response { request_id, response }, .. })) => {
+                            if let Some((expected, reply)) = pending_page.remove(&request_id) {
+                                if !reply.is_closed() { crate::mobile_control::network_progress(); }
+                                let _ = reply.send(if peer == expected { Ok(response) } else { Err(anyhow::anyhow!("manifest page response peer")) });
+                            }
+                        }
+                        SwarmEvent::Behaviour(BehaviourEvent::Segment(rr::Event::Message { peer, message: Message::Response { request_id, response }, .. })) => {
+                            if let Some((expected, reply)) = pending_segment.remove(&request_id) {
+                                if !reply.is_closed() { crate::mobile_control::network_progress(); }
+                                let _ = reply.send(if peer == expected { Ok(response) } else { Err(anyhow::anyhow!("segment response peer")) });
+                            }
+                        }
+                        SwarmEvent::Behaviour(BehaviourEvent::Objects(rr::Event::Message { peer, message: Message::Response { request_id, response }, .. })) => {
+                            if let Some((expected, reply)) = pending_objects.remove(&request_id) {
+                                if !reply.is_closed() { crate::mobile_control::network_progress(); }
+                                let _ = reply.send(if peer == expected { Ok(response) } else { Err(anyhow::anyhow!("object response peer")) });
+                            }
+                        }
+                        SwarmEvent::Behaviour(BehaviourEvent::Pool(rr::Event::Message { peer, message: Message::Response { request_id, response }, .. })) => {
+                            if let Some((expected, reply)) = pending_pool.remove(&request_id) {
+                                if !reply.is_closed() { crate::mobile_control::network_progress(); }
+                                let _ = reply.send(if peer == expected { Ok(response) } else { Err(anyhow::anyhow!("transaction response peer")) });
+                            }
+                        }
+                        SwarmEvent::Behaviour(BehaviourEvent::Manifest(rr::Event::OutboundFailure { request_id, error, .. })) => {
+                            if let Some((_, reply)) = pending_manifest.remove(&request_id) { let _ = reply.send(Err(anyhow::Error::new(error).context("manifest transfer"))); }
+                        }
+                        SwarmEvent::Behaviour(BehaviourEvent::ManifestPage(rr::Event::OutboundFailure { request_id, error, .. })) => {
+                            if let Some((_, reply)) = pending_page.remove(&request_id) { let _ = reply.send(Err(anyhow::anyhow!("manifest page transfer: {error}"))); }
+                        }
+                        SwarmEvent::Behaviour(BehaviourEvent::Segment(rr::Event::OutboundFailure { request_id, error, .. })) => {
+                            if let Some((_, reply)) = pending_segment.remove(&request_id) { let _ = reply.send(Err(anyhow::Error::new(error).context("segment transfer"))); }
+                        }
+                        SwarmEvent::Behaviour(BehaviourEvent::Objects(rr::Event::OutboundFailure { request_id, error, .. })) => {
+                            if let Some((_, reply)) = pending_objects.remove(&request_id) { let _ = reply.send(Err(anyhow::Error::new(error).context("object transfer"))); }
+                        }
+                        SwarmEvent::Behaviour(BehaviourEvent::Pool(rr::Event::OutboundFailure { request_id, error, .. })) => {
+                            if let Some((_, reply)) = pending_pool.remove(&request_id) { let _ = reply.send(Err(anyhow::anyhow!("transaction transfer: {error}"))); }
+                        }
                         SwarmEvent::Behaviour(BehaviourEvent::Headers(rr::Event::Message { peer, message: Message::Response { request_id, response }, .. })) => {
                             if let Some((expected, request, reply)) = pending_headers.remove(&request_id) {
+                                if !reply.is_closed() { crate::mobile_control::network_progress(); }
                                 let result = (|| -> Result<_> {
                                     ensure!(peer == expected, "header response peer");
                                     ensure!(response.records.len() <= request.count as usize, "header response count");
@@ -337,6 +450,7 @@ impl Network {
                         }
                         SwarmEvent::Behaviour(BehaviourEvent::Terminal(rr::Event::Message { peer, message: Message::Response { request_id, response }, .. })) => {
                             if let Some((expected, request, reply)) = pending_terminal.remove(&request_id) {
+                                if !reply.is_closed() { crate::mobile_control::network_progress(); }
                                 let result = (|| -> Result<_> {
                                     ensure!(peer == expected && response.height == request.height && response.block_hash == request.block_hash, "terminal response identity");
                                     Ok(response)
@@ -346,6 +460,7 @@ impl Network {
                         }
                         SwarmEvent::Behaviour(BehaviourEvent::Origin(rr::Event::Message { peer, message: Message::Response { request_id, response }, .. })) => {
                             if let Some((expected, request, reply)) = pending_origin.remove(&request_id) {
+                                if !reply.is_closed() { crate::mobile_control::network_progress(); }
                                 let result = (|| -> Result<_> {
                                     ensure!(peer == expected && response.request == request, "origin response identity");
                                     Ok(response)
@@ -354,13 +469,13 @@ impl Network {
                             }
                         }
                         SwarmEvent::Behaviour(BehaviourEvent::Headers(rr::Event::OutboundFailure { request_id, error, .. })) => {
-                            if let Some((_, _, reply)) = pending_headers.remove(&request_id) { let _ = reply.send(Err(anyhow::anyhow!("header transfer: {error}"))); }
+                            if let Some((_, _, reply)) = pending_headers.remove(&request_id) { let _ = reply.send(Err(anyhow::Error::new(error).context("header transfer"))); }
                         }
                         SwarmEvent::Behaviour(BehaviourEvent::Terminal(rr::Event::OutboundFailure { request_id, error, .. })) => {
-                            if let Some((_, _, reply)) = pending_terminal.remove(&request_id) { let _ = reply.send(Err(anyhow::anyhow!("terminal transfer: {error}"))); }
+                            if let Some((_, _, reply)) = pending_terminal.remove(&request_id) { let _ = reply.send(Err(anyhow::Error::new(error).context("terminal transfer"))); }
                         }
                         SwarmEvent::Behaviour(BehaviourEvent::Origin(rr::Event::OutboundFailure { request_id, error, .. })) => {
-                            if let Some((_, _, reply)) = pending_origin.remove(&request_id) { let _ = reply.send(Err(anyhow::anyhow!("origin transfer: {error}"))); }
+                            if let Some((_, _, reply)) = pending_origin.remove(&request_id) { let _ = reply.send(Err(anyhow::Error::new(error).context("origin transfer"))); }
                         }
                         SwarmEvent::ConnectionClosed { peer_id, num_established: 0, .. } => {
                             identified.remove(&peer_id); compatible.remove(&peer_id); handshakes.remove(&peer_id);
@@ -387,7 +502,7 @@ impl Network {
         self.headers_with_inventory(peer, first, count, false).await
     }
 
-    async fn headers_with_inventory(
+    pub(crate) async fn headers_with_inventory(
         &self,
         peer: PeerId,
         first: u64,
@@ -476,11 +591,164 @@ impl Network {
             .await?;
         result.await??.bytes.context("peer origin unavailable")
     }
+
+    pub(crate) async fn ready(&self) -> Result<Vec<PeerId>> {
+        let mut peers = self.peers.clone();
+        while peers.borrow().is_empty() {
+            tokio::time::timeout(Duration::from_secs(20), peers.changed()).await??;
+        }
+        let ready = peers.borrow().clone();
+        Ok(ready)
+    }
+
+    pub(crate) async fn manifest(&self, peer: PeerId) -> Result<GetStateManifestHeader> {
+        let (reply, result) = oneshot::channel();
+        self.commands.send(Command::Manifest(peer, reply)).await?;
+        result.await?
+    }
+
+    pub(crate) async fn page(
+        &self,
+        peer: PeerId,
+        request: GetSnapshotManifestPageRequest,
+    ) -> Result<Vec<u8>> {
+        for _ in 0..3 {
+            let (reply, result) = oneshot::channel();
+            self.commands
+                .send(Command::Page(peer, request, reply))
+                .await?;
+            let response = result.await??;
+            ensure!(response.object == request.object, "manifest page identity");
+            if let DataResponseStatus::Busy { retry_after_ms } = response.status {
+                tokio::time::sleep(Duration::from_millis(retry_after_ms.into())).await;
+                continue;
+            }
+            let bytes = response.data.context("peer manifest page unavailable")?;
+            ensure!(
+                request.object.page.matches_bytes(&bytes),
+                "manifest page digest"
+            );
+            crate::peer_wallet::record_payload(bytes.len());
+            return Ok(bytes.to_vec());
+        }
+        bail!("peer manifest page remained busy")
+    }
+
+    pub(crate) async fn segments(
+        &self,
+        peer: PeerId,
+        request: GetStateSegmentRequest,
+    ) -> Result<Vec<(u16, Vec<u8>)>> {
+        let requested: Vec<_> = std::iter::once(request.segment_id)
+            .chain(request.additional_segments.iter().copied())
+            .collect();
+        ensure!(
+            requested.len() <= noid_p2p::protocol::MAX_STATE_SEGMENT_BATCH
+                && requested.windows(2).all(|p| p[0] < p[1]),
+            "Segment request order"
+        );
+        for _ in 0..3 {
+            let (reply, result) = oneshot::channel();
+            self.commands
+                .send(Command::Segment(peer, request.clone(), reply))
+                .await?;
+            let response = result.await??;
+            ensure!(
+                response.segment_id == request.segment_id
+                    && response.expected_tip_height == request.expected_tip_height
+                    && response.expected_tip_hash == request.expected_tip_hash
+                    && response.manifest_digest == request.manifest_digest,
+                "Segment response identity"
+            );
+            if let DataResponseStatus::Busy { retry_after_ms } = response.status {
+                tokio::time::sleep(Duration::from_millis(retry_after_ms.into())).await;
+                continue;
+            }
+            let mut parts = Vec::new();
+            if let Some(bytes) = response.data {
+                parts.push((response.segment_id, bytes));
+            }
+            parts.extend(
+                response
+                    .additional_segments
+                    .into_iter()
+                    .map(|p| (p.segment_id, p.data)),
+            );
+            ensure!(
+                !parts.is_empty()
+                    && parts.len() <= requested.len()
+                    && parts.windows(2).all(|p| p[0].0 < p[1].0)
+                    && parts.iter().all(|p| requested.binary_search(&p.0).is_ok()),
+                "Segment response selection"
+            );
+            for (_, bytes) in &parts {
+                crate::peer_wallet::record_payload(bytes.len());
+            }
+            return Ok(parts);
+        }
+        bail!("Peer State segments remained busy")
+    }
+
+    pub(crate) async fn object(&self, peer: PeerId, object: ObjectId) -> Result<Vec<u8>> {
+        for _ in 0..3 {
+            let (reply, result) = oneshot::channel();
+            self.commands
+                .send(Command::Objects(
+                    peer,
+                    GetObjectsRequest {
+                        objects: vec![object],
+                    },
+                    reply,
+                ))
+                .await?;
+            let mut response = result.await??;
+            if let DataResponseStatus::Busy { retry_after_ms } = response.status {
+                tokio::time::sleep(Duration::from_millis(retry_after_ms.into())).await;
+                continue;
+            }
+            ensure!(
+                response.objects.len() == 1 && response.objects[0].object == object,
+                "object response identity"
+            );
+            let bytes = response
+                .objects
+                .remove(0)
+                .bytes
+                .context("peer block body unavailable")?;
+            ensure!(object.matches_bytes(&bytes), "block object digest");
+            crate::peer_wallet::record_payload(bytes.len());
+            return Ok(bytes);
+        }
+        bail!("peer block body remained busy")
+    }
+
+    pub(crate) async fn pool(
+        &self,
+        peer: PeerId,
+        request: MempoolRequest,
+    ) -> Result<GetMempoolResponse> {
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .send(Command::Pool(peer, request, reply))
+            .await?;
+        result.await?
+    }
 }
 
-async fn discover(
+pub(crate) fn with_peers<T>(
+    artifacts: &Path,
+    work: impl FnOnce(&tokio::runtime::Runtime, Network) -> Result<T>,
+) -> Result<T> {
+    let legacy = artifacts::read_bounded(&artifacts.join("legacy"), 4 * 1024 * 1024)?;
+    ensure!(legacy.len() >= 32, "released profile length");
+    let bank = legacy[legacy.len() - 32..].try_into()?;
+    with_connection(bank, NetworkProfile::for_proof_bank(bank), work)
+}
+
+pub(crate) async fn discover(
     network: &mut Network,
 ) -> Result<Vec<(PeerId, noid_p2p::object_protocol::ChainPoint)>> {
+    let _waiting = crate::mobile_control::waiting_for_network("peer-discovery");
     let start = Instant::now();
     let starting = network.peers.borrow().is_empty();
     loop {
@@ -498,38 +766,40 @@ async fn discover(
     let mut queries = FuturesUnordered::new();
     for peer in peers {
         let network = network.clone();
-        queries.push(async move { (peer, network.headers(peer, 0, 1).await) });
+        queries.push(async move {
+            let result = async {
+                let response = network.headers(peer, 0, 1).await?;
+                ensure!(
+                    response.records.first().is_some_and(
+                        |r| r.header == noid_chain::consensus::genesis::genesis_header()
+                    ),
+                    "Peer genesis differs"
+                );
+                let mut boundary = response
+                    .snapshot_boundary
+                    .context("Peer has no proof boundary")?;
+                ensure!(boundary.height < MAX_HEIGHT, "Peer height budget");
+                if let Ok(tail) = network
+                    .headers_with_inventory(peer, boundary.height + 1, 64, true)
+                    .await
+                {
+                    if let Some(record) = tail.records.iter().rev().find(|r| r.terminal.is_some()) {
+                        boundary = noid_p2p::object_protocol::ChainPoint::new(
+                            record.header.height,
+                            block_id(&record.header),
+                        );
+                    }
+                }
+                Ok::<_, anyhow::Error>(boundary)
+            }
+            .await;
+            (peer, result)
+        });
     }
     let mut candidates = Vec::new();
     while let Some((peer, response)) = queries.next().await {
-        if let Ok(response) = response {
-            if response
-                .records
-                .first()
-                .is_some_and(|r| r.header == noid_chain::consensus::genesis::genesis_header())
-            {
-                if let Some(mut boundary) = response.snapshot_boundary {
-                    if boundary.height < MAX_HEIGHT {
-                        if let Ok(tail) = network
-                            .headers_with_inventory(peer, boundary.height + 1, 64, true)
-                            .await
-                        {
-                            if let Some(record) = tail
-                                .records
-                                .iter()
-                                .rev()
-                                .find(|record| record.terminal.is_some())
-                            {
-                                boundary = noid_p2p::object_protocol::ChainPoint::new(
-                                    record.header.height,
-                                    block_id(&record.header),
-                                );
-                            }
-                        }
-                        candidates.push((peer, boundary));
-                    }
-                }
-            }
+        if let Ok(boundary) = response {
+            candidates.push((peer, boundary));
         }
     }
     ensure!(
@@ -553,6 +823,7 @@ async fn fetch_bundle(
     verifier: &Verifier,
     previous: Option<&Path>,
 ) -> Result<()> {
+    let _waiting = crate::mobile_control::waiting_for_network("proof-download");
     ensure!(!output.exists(), "sync bundle already exists");
     let temporary = tempfile::Builder::new()
         .prefix(".receiving-")
@@ -701,6 +972,14 @@ async fn fetch_bundle(
         temporary.path().join("bundle.json"),
         serde_json::to_vec_pretty(&manifest)?,
     )?;
+    if let Err(error) =
+        crate::peer_wallet::prepare_candidate(network, temporary.path(), output, boundary.height)
+            .await
+    {
+        crate::mobile_control::check()?;
+        eprintln!("  WALLET     Prefetch deferred: {error:#}");
+    }
+    crate::mobile_control::verifying();
     fs::rename(temporary.path(), output)?;
     eprintln!(
         "\n  RECEIVED   {:.2} MiB in {:.2}s",
@@ -718,33 +997,63 @@ async fn fetch_bundle(
 }
 
 pub(crate) fn observed_height(artifact_directory: &Path) -> Result<u64> {
-    let legacy=artifacts::pinned(artifact_directory,"legacy")?;
-    let bank=legacy[legacy.len()-32..].try_into()?;
-    with_connection(bank,NetworkProfile::for_proof_bank(bank),|executor,mut network| {
-        executor.block_on(crate::mobile_control::cancellable(async move {
-            while network.peers.borrow().is_empty() {
-                tokio::time::timeout(Duration::from_secs(10),network.peers.changed()).await??;
-            }
-            let peers=network.peers.borrow().clone();
-            let mut replies=FuturesUnordered::new();
-            for peer in peers.into_iter().take(2) {
-                let network=network.clone();
-                replies.push(async move {(peer,network.headers(peer,0,1).await)});
-            }
-            while let Some((peer,reply))=tokio::time::timeout(Duration::from_secs(3),replies.next()).await? {
-                if let Ok(reply)=reply {
-                    if reply.records.first().is_some_and(|r|r.header==noid_chain::consensus::genesis::genesis_header()) {
-                        if let Some(point)=reply.snapshot_boundary.filter(|p|p.height<MAX_HEIGHT) {
-                            let tail=tokio::time::timeout(Duration::from_secs(3),network.headers_with_inventory(peer,point.height+1,64,false)).await;
-                            let observed=tail.ok().and_then(Result::ok).and_then(|r|r.records.into_iter().filter(|r|r.header.height>point.height && r.header.height<=point.height+64 && r.header.height<MAX_HEIGHT).map(|r|r.header.height).max());
-                            return Ok(observed.unwrap_or(point.height));
+    let legacy = artifacts::pinned(artifact_directory, "legacy")?;
+    let bank = legacy[legacy.len() - 32..].try_into()?;
+    with_connection(
+        bank,
+        NetworkProfile::for_proof_bank(bank),
+        |executor, mut network| {
+            executor.block_on(crate::mobile_control::cancellable(async move {
+                while network.peers.borrow().is_empty() {
+                    tokio::time::timeout(Duration::from_secs(10), network.peers.changed())
+                        .await??;
+                }
+                let peers = network.peers.borrow().clone();
+                let mut replies = FuturesUnordered::new();
+                for peer in peers.into_iter().take(2) {
+                    let network = network.clone();
+                    replies.push(async move { (peer, network.headers(peer, 0, 1).await) });
+                }
+                while let Some((peer, reply)) =
+                    tokio::time::timeout(Duration::from_secs(3), replies.next()).await?
+                {
+                    if let Ok(reply) = reply {
+                        if reply.records.first().is_some_and(|r| {
+                            r.header == noid_chain::consensus::genesis::genesis_header()
+                        }) {
+                            if let Some(point) =
+                                reply.snapshot_boundary.filter(|p| p.height < MAX_HEIGHT)
+                            {
+                                let tail = tokio::time::timeout(
+                                    Duration::from_secs(3),
+                                    network.headers_with_inventory(
+                                        peer,
+                                        point.height + 1,
+                                        64,
+                                        false,
+                                    ),
+                                )
+                                .await;
+                                let observed = tail.ok().and_then(Result::ok).and_then(|r| {
+                                    r.records
+                                        .into_iter()
+                                        .filter(|r| {
+                                            r.header.height > point.height
+                                                && r.header.height <= point.height + 64
+                                                && r.header.height < MAX_HEIGHT
+                                        })
+                                        .map(|r| r.header.height)
+                                        .max()
+                                });
+                                return Ok(observed.unwrap_or(point.height));
+                            }
                         }
                     }
                 }
-            }
-            anyhow::bail!("Mainnet peer is unavailable")
-        }))
-    })
+                anyhow::bail!("Mainnet peer is unavailable")
+            }))
+        },
+    )
 }
 
 pub fn run(
@@ -769,12 +1078,15 @@ pub fn run(
     let profile = NetworkProfile::for_proof_bank(bank);
     eprintln!("  NETWORK    Discovering mainnet peers over device internet");
     with_connection(bank, profile, |executor, mut network| {
+        let runtime_started = Instant::now();
         crate::verifier_session::with(&artifact_directory, |verifier| {
+            let runtime_load_ms = runtime_started.elapsed().as_millis();
             executor.block_on(crate::mobile_control::cancellable(async move {
         let mut round = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis() as u64;
         let mut previous: Option<PathBuf> = None;
         let mut accepted_height = None;
         let mut resumed = None;
+        let resume_started = Instant::now();
         if let Ok(bytes) = artifacts::read_bounded(&data_directory.join("accepted.json"), 1024 * 1024) {
             if let Ok(saved) = serde_json::from_slice::<serde_json::Value>(&bytes) {
                 if let Some(name) = saved["bundle"].as_str().filter(|name| name.starts_with("candidate-") && name.len()<128 && !name.contains('/') && !name.contains('\\')) {
@@ -789,9 +1101,12 @@ pub fn run(
                 }
             }
         }
+        let resume_ms = resume_started.elapsed().as_millis();
         let mut initial_sync_ms = None;
         loop {
+            let discovery_started = Instant::now();
             let candidates = discover(&mut network).await?;
+            let discovery_ms = discovery_started.elapsed().as_millis();
             if accepted_height.is_some_and(|height| candidates.iter().all(|(_, point)| point.height <= height)) {
                 // Returning the saved State itself requires its full proof.
                 if resumed.is_none() {
@@ -807,18 +1122,29 @@ pub fn run(
                         }
                     }
                 }
-                if once { return resumed.context("accepted boundary unavailable"); }
+                if once {
+                    let mut result = resumed.context("accepted boundary unavailable")?;
+                    result["runtime_load_ms"] = serde_json::json!(runtime_load_ms);
+                    result["resume_ms"] = serde_json::json!(resume_ms);
+                    result["discovery_ms"] = serde_json::json!(discovery_ms);
+                    result["transfer_ms"] = serde_json::json!(0);
+                    return Ok(result);
+                }
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             }
             let mut accepted = None;
+            let mut transfer_ms = 0;
             let update_started = Instant::now();
             for (peer, boundary) in candidates {
                 round += 1;
                 let output = data_directory.join(format!("candidate-{round}-{}", boundary.height));
                 if accepted_height.is_some_and(|height| boundary.height <= height) { continue; }
                 crate::mobile_control::verifying();
-                match fetch_bundle(&network, peer, boundary, &output, &verifier, previous.as_deref()).await {
+                let transfer_started = Instant::now();
+                let fetched = fetch_bundle(&network, peer, boundary, &output, &verifier, previous.as_deref()).await;
+                transfer_ms += transfer_started.elapsed().as_millis();
+                match fetched {
                     Ok(()) => {
                         eprintln!("  VERIFY     Header work, fork certificate and recursive State proof");
                         let checked = verifier.verify_bundle(&output);
@@ -848,7 +1174,8 @@ pub fn run(
             let startup_ms = *initial_sync_ms.get_or_insert_with(|| started.elapsed().as_millis());
             let peak = peak_memory_kib();
             if let Some(kib) = peak { eprintln!("  RAM        {:.1} MiB peak", kib as f64/1024.0); }
-            let result = serde_json::json!({"transport":"direct-p2p","bundle":directory.file_name().and_then(|v|v.to_str()),"startup_ms":startup_ms,"update_ms":update_started.elapsed().as_millis(),"peak_rss_kib":peak,"verified":state});
+            let result = serde_json::json!({"transport":"direct-p2p","bundle":directory.file_name().and_then(|v|v.to_str()),"startup_ms":startup_ms,"update_ms":update_started.elapsed().as_millis(),"peak_rss_kib":peak,"verified":state,
+                "runtime_load_ms":runtime_load_ms,"resume_ms":resume_ms,"discovery_ms":discovery_ms,"transfer_ms":transfer_ms});
             let mut record=tempfile::NamedTempFile::new_in(&data_directory)?;
             record.write_all(&serde_json::to_vec_pretty(&result)?)?;
             record.as_file().sync_all()?;

@@ -16,11 +16,12 @@ use noid_poseidon2b::{
     native::domain::{capacity_iv_flat, TAG_BLOCKHDR, TAG_POWHDR},
 };
 use rayon::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha512};
 use std::{
     collections::VecDeque,
     fs::File,
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     path::Path,
     sync::Mutex,
 };
@@ -28,6 +29,43 @@ use std::{
 const MAX_HEADER_FILE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const HEADER_CHUNK: usize = 4096;
 const HASH_BATCH: usize = 128;
+const CHECKPOINT_DOMAIN: &[u8] = b"Paramo1d/verified-header-prefix/1";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PrefixRecord {
+    version: u8,
+    count: u64,
+    tip: String,
+    work: String,
+    sha512: String,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SealedPrefix {
+    record: PrefixRecord,
+    tag: String,
+}
+
+fn copy_and_hash(input: &mut File, output: &mut impl Write, bytes: u64) -> Result<String> {
+    let mut hash = Sha512::new();
+    let mut remaining = bytes;
+    let mut buffer = [0u8; 65536];
+    input.seek(SeekFrom::Start(0))?;
+    while remaining > 0 {
+        crate::mobile_control::check()?;
+        let count = remaining.min(buffer.len() as u64) as usize;
+        input.read_exact(&mut buffer[..count])?;
+        output.write_all(&buffer[..count])?;
+        hash.update(&buffer[..count]);
+        remaining -= count as u64;
+    }
+    ensure!(
+        input.read(&mut buffer[..1])? == 0,
+        "Header checkpoint length changed"
+    );
+    Ok(hex::encode(hash.finalize()))
+}
 
 struct HeaderHashes {
     id: [u8; 32],
@@ -114,6 +152,90 @@ pub fn read_header(file: &mut File, height: u64) -> Result<BlockHeader> {
 }
 
 impl CheckedHeaders {
+    pub(crate) fn save_checkpoint(&self, path: &Path) -> Result<()> {
+        if crate::wallet_checkpoint::local_tag(CHECKPOINT_DOMAIN, b"")?.is_none() {
+            return Ok(());
+        }
+        let bytes = self
+            .count
+            .checked_mul(BLOCK_HEADER_WIRE_SIZE as u64)
+            .context("Header checkpoint bytes")?;
+        let mut input = self
+            .file
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Header checkpoint lock"))?;
+        let mut sink = std::io::sink();
+        let digest = copy_and_hash(&mut input, &mut sink, bytes)?;
+        let record = PrefixRecord {
+            version: 1,
+            count: self.count,
+            tip: hex::encode(self.tip.to_bytes()),
+            work: hex::encode(self.work),
+            sha512: digest,
+        };
+        let tag =
+            crate::wallet_checkpoint::local_tag(CHECKPOINT_DOMAIN, &serde_json::to_vec(&record)?)?
+                .context("Header checkpoint identity")?;
+        let folder = path.parent().context("Header checkpoint directory")?;
+        let mut out = tempfile::NamedTempFile::new_in(folder)?;
+        out.write_all(&serde_json::to_vec(&SealedPrefix { record, tag })?)?;
+        out.as_file().sync_all()?;
+        out.persist(folder.join("headers-auth.json"))
+            .map_err(|e| e.error)?;
+        Ok(())
+    }
+
+    pub(crate) fn restore_checkpoint(path: &Path) -> Result<Self> {
+        let folder = path.parent().context("Header checkpoint directory")?;
+        let data = crate::artifacts::read_bounded(&folder.join("headers-auth.json"), 16384)?;
+        let sealed: SealedPrefix = serde_json::from_slice(&data)?;
+        crate::wallet_checkpoint::check_local_tag(
+            CHECKPOINT_DOMAIN,
+            &serde_json::to_vec(&sealed.record)?,
+            &sealed.tag,
+        )?;
+        let r = sealed.record;
+        let bytes = r
+            .count
+            .checked_mul(BLOCK_HEADER_WIRE_SIZE as u64)
+            .context("Header checkpoint bytes")?;
+        ensure!(
+            r.version == 1 && r.count > 0 && bytes <= MAX_HEADER_FILE_BYTES,
+            "Header checkpoint shape"
+        );
+        let tip = BlockHeader::from_bytes(&hex::decode(r.tip)?)
+            .map_err(|_| anyhow::anyhow!("Header checkpoint tip"))?;
+        let work = hex::decode(r.work)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Header checkpoint work"))?;
+        ensure!(
+            tip.height.checked_add(1) == Some(r.count),
+            "Header checkpoint count"
+        );
+        let mut input = File::open(path)?;
+        ensure!(
+            input.metadata()?.len() == bytes,
+            "Header checkpoint file size"
+        );
+        let mut file = tempfile::tempfile_in(folder)?;
+        ensure!(
+            copy_and_hash(&mut input, &mut file, bytes)? == r.sha512,
+            "Header checkpoint bytes changed"
+        );
+        ensure!(
+            read_header(&mut file, 0)? == genesis_header()
+                && read_header(&mut file, tip.height)? == tip,
+            "Header checkpoint boundaries"
+        );
+        Ok(Self {
+            file: Mutex::new(file),
+            tip,
+            work,
+            count: r.count,
+            reused: r.count,
+        })
+    }
+
     pub fn verify(path: &Path) -> Result<Self> {
         Self::verify_after(path, None)
     }
@@ -311,6 +433,55 @@ impl CheckedHeaders {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authenticated_header_resume_binds_bytes_work_identity_and_new_extension() {
+        let directory = tempfile::tempdir().unwrap();
+        let old = directory.path().join("old");
+        let new = directory.path().join("new");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        let path = old.join("headers.bin");
+        let genesis = genesis_header();
+        std::fs::write(&path, genesis.to_bytes()).unwrap();
+        let checked = CheckedHeaders::verify(&path).unwrap();
+        let args = serde_json::json!({"seed_hex":hex::encode([19u8;32])});
+        crate::wallet_checkpoint::with_identity(&args, || {
+            checked.save_checkpoint(&path).unwrap();
+            let restored = CheckedHeaders::restore_checkpoint(&path).unwrap();
+            assert_eq!(restored.tip, checked.tip);
+            assert_eq!(restored.work, checked.work);
+            let next = new.join("headers.bin");
+            let mut bytes = genesis.to_bytes().to_vec();
+            bytes.extend_from_slice(include_bytes!("../tests/fixtures/mainnet-first-header.bin"));
+            std::fs::write(&next, &bytes).unwrap();
+            let extended = CheckedHeaders::verify_after(&next, Some(&restored)).unwrap();
+            let fresh = CheckedHeaders::verify(&next).unwrap();
+            assert_eq!(extended.reused, 1);
+            assert_eq!(extended.tip, fresh.tip);
+            assert_eq!(extended.work, fresh.work);
+            let checkpoint = std::fs::read(old.join("headers-auth.json")).unwrap();
+            let mut forged: serde_json::Value = serde_json::from_slice(&checkpoint).unwrap();
+            forged["record"]["work"] = serde_json::json!("ff".repeat(32));
+            std::fs::write(
+                old.join("headers-auth.json"),
+                serde_json::to_vec(&forged).unwrap(),
+            )
+            .unwrap();
+            assert!(CheckedHeaders::restore_checkpoint(&path).is_err());
+            std::fs::write(old.join("headers-auth.json"), checkpoint).unwrap();
+            let mut changed = genesis.to_bytes().to_vec();
+            changed[40] ^= 1;
+            std::fs::write(&path, changed).unwrap();
+            assert!(CheckedHeaders::restore_checkpoint(&path).is_err());
+            std::fs::write(&path, genesis.to_bytes()).unwrap();
+        });
+        assert!(CheckedHeaders::restore_checkpoint(&path).is_err());
+        crate::wallet_checkpoint::with_identity(
+            &serde_json::json!({"seed_hex":hex::encode([18u8;32])}),
+            || assert!(CheckedHeaders::restore_checkpoint(&path).is_err()),
+        );
+    }
 
     #[test]
     fn batched_header_domains_match_scalar_consensus_for_every_field() {

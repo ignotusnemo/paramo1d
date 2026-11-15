@@ -22,8 +22,8 @@ Replies and reactions use readable, signed text inside the existing message enve
 
 1. Open a direct conversation to request or send NOID.
 2. Review the recipient, amount and network fee. Authorize the exact reviewed payment on the device.
-3. The wallet submits the packet to its configured chain endpoint. If delivery is unavailable, select **Ask the community to help**.
-4. A participant selects **Help send this payment** and reviews the packet. The participant forwards the existing authorization and needs no spending secret.
+3. The wallet broadcasts through mainnet P2P in Paranoid mode or its configured RPC in Normal mode. An offline phone passes the packet over Bluetooth. Normal mode also offers **Ask the community to help**.
+4. A participant selects **Help send this payment**, reviews the packet and forwards the authorization. The spending secret stays with the sender.
 5. The same card collects authenticated helper observations. **Check payment** checks a returned receipt against the device's verified chain.
 
 The card distinguishes ready-to-relay packets, node submission, reported mempool presence, received inclusion evidence and locally verified inclusion. Finality uses the finality depth of the verified chain. Helper counts identify contributors. Each helper's observation remains an attributed report until the client checks its inclusion evidence.
@@ -34,7 +34,7 @@ The client saves its verified wallet view with a local authentication tag. The t
 
 Authorization rechecks the reviewed payment against the authenticated wallet checkpoint. An online authorization checks the observed height again. When the network rejects an expired authorization, its card shows **Payment expired**. The sender can select **Review fresh payment** to update the wallet and review a replacement. A helper is asked to contact the sender. An inclusion receipt can still establish that an earlier payment already reached the chain.
 
-Full proof verification authenticates its parameters and preserves accepted chainwork and finality. The worker retains immutable matrix data in a bounded cache to avoid repeated decoding and authentication. The canonical matrix byte budget is 640 MiB while the app is open and 192 MiB after it is minimized. Android memory-pressure callbacks release the cache. A saved proof result can be reused in the running process only with the same bundle path and a fresh SHA-512 fingerprint of its consumed files. On a fresh synchronization after restart, the client checks the saved header prefix and verifies a newer recursive proof directly.
+Full proof verification authenticates its parameters and preserves accepted chainwork and finality. Release preflight checks each complete canonical matrix against its bank's structural digest, then records its SHA-256 commitment in `profiles/mainnet-matrices.json`. The phone checks all decoded matrix bytes against that compiled commitment before indexing them. Immutable checked rows stay in a bounded cache. The cache budget is 640 MiB while the app is open and 192 MiB after it is minimized, accounted from retained heap payload. Android memory-pressure callbacks release the cache. A saved proof result can be reused in the running process only with the same bundle path and a fresh SHA-512 fingerprint of its consumed files. On a fresh synchronization after restart, the client checks the saved header prefix and verifies a newer recursive proof directly.
 
 The initial wallet derives its ordinary NOID receiving address at index zero. Invoices carry an off-chain request identifier, address, amount and memo. A verified receipt establishes the transaction's outputs and inclusion. Account for each transaction ID once when reconciling invoices.
 
@@ -52,13 +52,27 @@ The protected connection uses an application-owned AmneziaWG stack and an authen
 
 Successful reads and writes renew the protected stream's idle timeout. Active chat and node connections can continue across the timeout interval.
 
-Bluetooth links authenticate both contact cards and fresh session challenges, then encrypt frames. A device can retain an envelope addressed to another contact and carry it without decrypting its contents. Nearby exchange keeps at most two active links and a bounded inventory. A received payment packet is locally checked with the native Owner verifier before it appears as authorized. Its inclusion receipt is checked separately against the phone's verified chain.
+Bluetooth links authenticate both contact cards and fresh session challenges, then encrypt frames. A device can retain an envelope addressed to another contact and carry it without decrypting its contents. Nearby exchange keeps at most two active links and a bounded inventory. When Bluetooth and internet delivery are both available, outgoing envelopes use both paths. Message IDs deduplicate arrivals. A received payment packet is locally checked with the native Owner verifier before it appears as authorized. Its inclusion receipt is checked separately against the phone's verified chain.
 
 The wallet uses adaptive updates while the application is open and unlocked. Small queries watch its coin set. A change in amount, slot or incarnation triggers independent verification of the latest State and the relevant slot proofs. Unchanged hints retain the last verified balance and its original check time. Funded wallets also watch the transaction epoch and renew their verified checkpoint in the background when it changes. **Update balance** uses the same change detection and shares an active check. Payment review waits for an active automatic check to finish and then uses its result. A new wallet starts its initial check when the Wallet screen is opened.
 
 Minimizing the application or locking the screen cancels the node check and closes its P2P connections. Background messages continue independently. Reopening resumes the watch from the saved wallet view. An already-approved payment can finish saving its authorization if the app is closed. A helper polls a bounded set of submitted transaction IDs while the application is open. These small status requests run separately from State synchronization. Helper watches expire after an hour or stop when they collect an inclusion receipt.
 
 The wallet's chain data endpoint supplies slot discovery, membership proofs and transaction submission. Slot contents are checked against an independently verified State root. A compatible endpoint implements `paranoid_getSlotsByOwner`, `paranoid_getSlotHints`, `paranoid_getSlotProof`, `paranoid_submitTxIntent`, `paranoid_getTx`, `paranoid_getMempoolEntry` and `paranoid_getBlock`.
+
+The header contains **Connections**, **App VPN**, **Paranoid mode** and Settings. App VPN's indicator shows whether its protected channel is connected, connecting or unavailable. Its switch controls the connection for Paramo1d alone.
+
+After repeated connection timeouts or transport failures, an online phone can offer **Turn on App VPN**. In both wallet modes, a P2P or RPC request waiting 15 seconds for network data can also trigger the offer while Update balance is still pending. Received data resets this timer. Proof verification runs outside it. The suggestion respects open dialogs and typing, and keeps an hour between suggestions. Offline and nearby Bluetooth sessions keep their ordinary flow. Enabling App VPN cancels an active balance request and resumes the wallet check through the protected connection. RPC cancellation covers response headers and body delivery. Other wallet operations finish before the route changes.
+
+**Paranoid mode** is off by default. It uses direct mainnet P2P for the wallet's data, payment broadcasts and inclusion receipts. The app turns orange and gives a short haptic click when the switch changes. Private chats, Bluetooth and App VPN retain their usual settings. Community navigation, public delivery and public-message forwarding pause until Paranoid mode is turned off. Saved community history is preserved. Connections shows the wallet's selected data transport separately.
+
+The first discovery verifies all live entries in a sparse State snapshot. After discovery the wallet keeps its ordinary NOID coins and a small empty-slot reserve. To advance this view it reads every intervening block body and checks its transaction root and header continuity. It applies inputs, output incarnations, native-page masks, coinbase and development payouts in canonical order. The independently verified recursive State proof authenticates the resulting chain extension. Completeness follows from the full initial scan and complete body sequence. Peer hints schedule verification. The saved balance updates after independent verification succeeds.
+
+The saved P2P view is authenticated with a domain-separated key derived from the protected wallet identity. Its tag covers the address, slot contents, header and released verification profile. Restarting reuses this small view. A gap exceeding 32 blocks starts fresh snapshot discovery. Unavailable intervening bodies or a saved branch that differs from the accepted chain also trigger discovery. Mainnet peers use their existing protocols.
+
+During recovery, the wallet fetches its block data before the recursive proof check and stages the resulting view until that check succeeds. Its height, block hash and State root must match the verified result before it is saved. A background watch collects responsive header hints for a further 400 ms after the first usable response, then proceeds with the collected hints.
+
+After complete verification, the client also authenticates its header prefix. The local record binds the exact header-file digest, tip, count, cumulative work and released profile. Restarting checks the record and file bytes before resuming header validation from that prefix. Modified records or files require ordinary header verification.
 
 ## Identity and storage
 
@@ -98,6 +112,8 @@ python3 scripts/build-courier.py \
 
 The script checks the upstream source inventory and parameter pins. It packages compressed verification parameters and the native ARM64 library. The APK is written to `android/app/build/outputs/apk/debug/app-debug.apk`. The first synchronization installs the parameters into private application storage. The verifier authenticates release metadata, matrix caches and proof claims. SHA-256 uses the library's ARM hardware backend when the processor supports it and its software fallback otherwise.
 
+Release maintainers regenerate canonical matrix commitments with `cargo run --release -- prepare-matrix-pins --artifacts /path/to/prepared-mainnet-artifacts`. This command fully authenticates all five matrices before emitting the replacement contents of `profiles/mainnet-matrices.json`.
+
 ### Signed releases
 
 Use `--variant release` with `PARAMO1D_ANDROID_KEYSTORE_PATH`, `PARAMO1D_ANDROID_STORE_PASSWORD` and `PARAMO1D_ANDROID_KEY_ALIAS` supplied through the build environment. The signed APK is written to `android/app/build/outputs/apk/release/app-release.apk`.
@@ -118,7 +134,7 @@ adb reverse tcp:9711 tcp:9711
 
 For a local relay, set `http://127.0.0.1:9711` in **Settings → Advanced connection settings**. The installed default uses the public HTTPS service. A local node RPC can be reached through a separate `adb reverse` mapping. The development APK uses the Android debug signing key.
 
-The [Redmi device report](reports/redmi-15c-2026-11-10.md) records the public deployment, actual Bluetooth exchange, native payment checks and observed mainnet transaction. Portable backups use Android's document picker. Keep the encrypted backup and its password separately.
+Portable backups use Android's document picker. Keep the encrypted backup and its password separately.
 
 ## Checks
 

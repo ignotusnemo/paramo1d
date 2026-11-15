@@ -42,19 +42,20 @@ pub fn set(port: Option<u16>, token: &str) -> Result<()> {
     *ROUTE.write().expect("route lock") = route;
     Ok(())
 }
-pub fn client(
-    builder: reqwest::blocking::ClientBuilder,
-) -> Result<reqwest::blocking::ClientBuilder> {
+pub(crate) fn client(builder: reqwest::ClientBuilder) -> Result<reqwest::ClientBuilder> {
     Ok(if let Some(route) = current() {
-        builder.proxy(
-            reqwest::Proxy::all(format!("http://127.0.0.1:{}", route.port))?
-                .basic_auth("paramo1d", &route.token),
-        )
+        builder.proxy(route.http_proxy()?)
     } else {
         builder
     })
 }
 impl Route {
+    fn http_proxy(&self) -> Result<reqwest::Proxy> {
+        Ok(
+            reqwest::Proxy::all(format!("http://127.0.0.1:{}", self.port))?
+                .basic_auth("paramo1d", &self.token),
+        )
+    }
     async fn connect(&self, target: &str) -> io::Result<tokio::net::TcpStream> {
         let mut stream =
             tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, self.port)).await?;
@@ -175,6 +176,68 @@ pub fn transport(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn asynchronous_rpc_authenticates_the_protected_proxy() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let route = Route {
+            port: listener.local_addr().unwrap().port(),
+            token: "ab".repeat(32),
+        };
+        let auth = STANDARD.encode(format!("paramo1d:{}", route.token));
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut header = Vec::new();
+            while !header.ends_with(b"\r\n\r\n") {
+                assert!(header.len() < 16384);
+                header.push(stream.read_u8().await.unwrap());
+            }
+            let header = String::from_utf8(header).unwrap();
+            assert!(header.starts_with("POST http://rpc.example/rpc HTTP/1.1\r\n"));
+            let actual_auth = header
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':')
+                        .filter(|(name, _)| name.eq_ignore_ascii_case("proxy-authorization"))
+                        .map(|(_, value)| value.trim())
+                })
+                .unwrap();
+            assert_eq!(actual_auth, format!("Basic {auth}"));
+            let length = header
+                .lines()
+                .find_map(|line| {
+                    line.split_once(':')
+                        .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                        .map(|(_, value)| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap();
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).await.unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()["method"],
+                "paranoid_getChainInfo"
+            );
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .await
+                .unwrap();
+        });
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .proxy(route.http_proxy().unwrap())
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let response = client
+            .post("http://rpc.example/rpc")
+            .json(&serde_json::json!({"method":"paranoid_getChainInfo"}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        assert_eq!(response.text().await.unwrap(), "{}");
+        task.await.unwrap();
+    }
     #[tokio::test]
     async fn protected_stream_keeps_payload_and_authenticates_local_proxy() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

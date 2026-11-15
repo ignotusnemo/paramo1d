@@ -20,22 +20,22 @@ use zeroize::Zeroizing;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Slot {
-    slot_index: u32,
-    value: u64,
-    creation_id: u64,
-    owner: String,
-    empty: bool,
+pub(crate) struct Slot {
+    pub(crate) slot_index: u32,
+    pub(crate) value: u64,
+    pub(crate) creation_id: u64,
+    pub(crate) owner: String,
+    pub(crate) empty: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Proof {
-    height: u64,
-    block_hash: String,
-    state_root: String,
-    log_slots: u32,
-    slots: Vec<Slot>,
-    siblings: Vec<String>,
+pub(crate) struct Proof {
+    pub(crate) height: u64,
+    pub(crate) block_hash: String,
+    pub(crate) state_root: String,
+    pub(crate) log_slots: u32,
+    pub(crate) slots: Vec<Slot>,
+    pub(crate) siblings: Vec<String>,
 }
 struct Boundary {
     header: BlockHeader,
@@ -91,7 +91,10 @@ fn boundary(args: &Value, fresh: bool) -> Result<Boundary> {
         anchor: None,
     })
 }
-fn verify_proof(header: &BlockHeader, proof: &Proof) -> Result<BTreeMap<u32, SlotValue>> {
+pub(crate) fn verify_proof(
+    header: &BlockHeader,
+    proof: &Proof,
+) -> Result<BTreeMap<u32, SlotValue>> {
     ensure!(header.log_slots <= 32, "Unsupported State depth");
     ensure!(
         proof.height == header.height
@@ -214,7 +217,7 @@ fn save_view(
         proof_header,
         &boundary.anchor.context("Verified epoch header")?,
     )?;
-    let cache = json!({"proofs":proofs,"checkpoint":checkpoint});
+    let cache = json!({"proofs":proofs,"checkpoint":checkpoint,"source":if crate::peer_wallet::enabled(args){"direct-p2p"}else{"rpc"}});
     let path = directory(args)?.join("wallet-view.json");
     let mut temporary = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
     use std::io::Write;
@@ -224,6 +227,31 @@ fn save_view(
     Ok(())
 }
 fn view(args: &Value, address: Address) -> Result<(Boundary, BTreeMap<u32, SlotValue>, u64)> {
+    if crate::peer_wallet::enabled(args) && args["use_cached"].as_bool() != Some(true) {
+        let wallet = crate::peer_wallet::fetch_wallet(args, address)?;
+        let bundle = crate::courier_api::accepted_bundle(&directory(args)?)?;
+        let epoch =
+            noid_chain::consensus::tx_epoch_anchor_height_for_child(wallet.header.height + 1);
+        let anchor =
+            crate::headers::read_header(&mut File::open(bundle.join("headers.bin"))?, epoch)?;
+        let checkpoint =
+            crate::wallet_checkpoint::seal(args, &wallet.header, &wallet.header, &anchor)?;
+        let cached =
+            json!({"checkpoint":checkpoint,"projection":wallet.seal(args)?,"source":"direct-p2p"});
+        let data = directory(args)?;
+        let mut file = tempfile::NamedTempFile::new_in(&data)?;
+        use std::io::Write;
+        file.write_all(&serde_json::to_vec(&cached)?)?;
+        file.as_file().sync_all()?;
+        file.persist(data.join("wallet-view.json"))
+            .map_err(|e| e.error)?;
+        let boundary = Boundary {
+            header: wallet.header,
+            bundle,
+            anchor: Some(anchor),
+        };
+        return Ok((boundary, wallet.slots, wallet.header.height));
+    }
     let mut checkpoint = None;
     let proofs = if args["use_cached"].as_bool() == Some(true) {
         ensure!(
@@ -235,6 +263,24 @@ fn view(args: &Value, address: Address) -> Result<(Boundary, BTreeMap<u32, SlotV
             8 * 1024 * 1024,
         )?;
         let cache: Value = serde_json::from_slice(&bytes)?;
+        if !cache["projection"].is_null() {
+            let (tip, proof, anchor) = crate::wallet_checkpoint::open(args, &cache["checkpoint"])?;
+            let wallet =
+                crate::peer_wallet_view::WalletView::open(args, address, &cache["projection"])?;
+            ensure!(
+                wallet.header == proof,
+                "Wallet projection checkpoint mismatch"
+            );
+            return Ok((
+                Boundary {
+                    header: tip,
+                    bundle: PathBuf::new(),
+                    anchor: Some(anchor),
+                },
+                wallet.slots,
+                proof.height,
+            ));
+        }
         checkpoint = crate::wallet_checkpoint::open(args, &cache["checkpoint"]).ok();
         serde_json::from_value::<Vec<Proof>>(cache["proofs"].clone())?
     } else {
@@ -257,7 +303,9 @@ fn view(args: &Value, address: Address) -> Result<(Boundary, BTreeMap<u32, SlotV
             proof,
         )
     } else {
-        let mut boundary = boundary(args, args["use_cached"].as_bool() != Some(true))?;
+        let fresh =
+            args["use_cached"].as_bool() != Some(true) && !crate::peer_wallet::enabled(args);
+        let mut boundary = boundary(args, fresh)?;
         let mut file = File::open(boundary.bundle.join("headers.bin"))?;
         let proof = crate::headers::read_header(&mut file, proof_height)?;
         let epoch =
@@ -305,28 +353,51 @@ fn owned_coin_set(
     Ok(coins)
 }
 #[derive(Debug, PartialEq, Eq)]
-enum WalletHint {
+pub(crate) enum WalletHint {
     Unchanged,
     CoinsChanged,
     EpochChanged,
 }
 fn wallet_change_hint(args: &Value, address: Address) -> Result<Option<WalletHint>> {
+    if crate::peer_wallet::enabled(args) {
+        return match crate::peer_wallet::watch(args, address) {
+            Ok(hint) => Ok(hint),
+            Err(error) => {
+                crate::mobile_control::check()?;
+                eprintln!("  P2P WATCH Verified refresh: {error:#}");
+                Ok(None)
+            }
+        };
+    }
     let path = directory(args)?.join("wallet-view.json");
     if !path.is_file() {
         return Ok(None);
     }
     let bytes = crate::artifacts::read_bounded(&path, 8 * 1024 * 1024)?;
     let cache: Value = serde_json::from_slice(&bytes)?;
-    let proofs: Vec<Proof> = serde_json::from_value(cache["proofs"].clone())?;
-    if proofs.is_empty() {
-        return Ok(None);
-    }
-    let epoch_slot = proofs
-        .iter()
-        .flat_map(|p| &p.slots)
-        .next()
-        .map(|s| s.slot_index);
-    let saved = owned_coin_set(proofs.into_iter().flat_map(|p| p.slots), address)?;
+    let (saved, epoch_slot) = if !cache["projection"].is_null() {
+        let (_, proof, _) = crate::wallet_checkpoint::open(args, &cache["checkpoint"])?;
+        let view = crate::peer_wallet_view::WalletView::open(args, address, &cache["projection"])?;
+        ensure!(
+            view.header == proof,
+            "Wallet projection checkpoint mismatch"
+        );
+        (view.coin_set(), view.slots.keys().next().copied())
+    } else {
+        let proofs: Vec<Proof> = serde_json::from_value(cache["proofs"].clone())?;
+        if proofs.is_empty() {
+            return Ok(None);
+        }
+        let index = proofs
+            .iter()
+            .flat_map(|p| &p.slots)
+            .next()
+            .map(|s| s.slot_index);
+        (
+            owned_coin_set(proofs.into_iter().flat_map(|p| p.slots), address)?,
+            index,
+        )
+    };
     let mut rpc = crate::rpc::Rpc::watch(arg(args, "rpc")?)?;
     let live: Vec<Slot> =
         serde_json::from_value(rpc.call("getSlotsByOwner", json!([address.to_bech32()]))?)?;
@@ -370,7 +441,7 @@ pub fn synchronize(args: &Value) -> Result<Value> {
     let (boundary, slots, proof_height) = view(args, address)?;
     let total = wallet_total(&slots, address)?;
     Ok(
-        json!({"height":boundary.header.height,"balance_height":proof_height,"balance":amount(total),"balance_micronoid":total.to_string(),"block_hash":hex::encode(noid_chain::block_header::block_id(&boundary.header))}),
+        json!({"height":boundary.header.height,"balance_height":proof_height,"balance":amount(total),"balance_micronoid":total.to_string(),"block_hash":hex::encode(noid_chain::block_header::block_id(&boundary.header)),"transport":if crate::peer_wallet::enabled(args){"direct-p2p"}else{"rpc"}}),
     )
 }
 fn wallet_total(slots: &BTreeMap<u32, SlotValue>, address: Address) -> Result<u64> {

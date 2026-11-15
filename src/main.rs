@@ -19,6 +19,16 @@ struct Arguments {
 #[derive(Subcommand)]
 enum Command {
     Profile,
+    PeerWallet {
+        #[arg(long)]
+        artifacts: PathBuf,
+        #[arg(long)]
+        data_dir: PathBuf,
+        #[arg(long)]
+        address: String,
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=10))]
+        repeat: u8,
+    },
     Run {
         #[arg(long)]
         artifacts: PathBuf,
@@ -48,6 +58,10 @@ enum Command {
         output: PathBuf,
         #[arg(long, value_delimiter = ',')]
         classes: Vec<String>,
+    },
+    PrepareMatrixPins {
+        #[arg(long)]
+        artifacts: PathBuf,
     },
     Fetch {
         #[arg(long)]
@@ -83,6 +97,23 @@ fn main() -> Result<()> {
             height,
         } => paramo1d::collector::export(&node_data, &output, height)?,
         Command::Profile => serde_json::to_value(artifacts::profile())?,
+        Command::PrepareMatrixPins { artifacts } => artifacts::prepare_matrix_pins(&artifacts)?,
+        Command::PeerWallet {
+            artifacts,
+            data_dir,
+            address,
+            repeat,
+        } => {
+            let mut results = Vec::new();
+            for _ in 0..repeat {
+                let result = paramo1d::courier_api::execute(&serde_json::to_vec(
+                    &serde_json::json!({"op":"peer_wallet_probe","artifacts":artifacts,"data_dir":data_dir,"address":address,"paranoid_mode":true}),
+                )?);
+                anyhow::ensure!(result["ok"].as_bool() == Some(true), "{}", result["error"]);
+                results.push(result["result"].clone());
+            }
+            serde_json::json!(results)
+        }
         Command::Run {
             artifacts,
             data_dir,
